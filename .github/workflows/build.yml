@@ -1,71 +1,45 @@
 name: build
 
 on:
-  workflow_call:
-    inputs:
-      target: # windows linux macos
-        required: true
-        type: string
-      project:
-        required: false
-        type: string
-        default: './v2rayN.Desktop/v2rayN.Desktop.csproj'
+  push:
+    branches: [ master ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: build x64 arm64
-    strategy:
-      matrix:
-        arch: [ x64, arm64 ]
-    runs-on: |-
-      ${{
-        case(
-          inputs.target == 'macos', 'macos-latest',
-          inputs.target == 'linux', 'ubuntu-24.04',
-          'ubuntu-latest'
-        )
-      }}
+    name: build x64
+    runs-on: ubuntu-latest
     env:
-      Output: "${{ github.workspace }}/${{ matrix.arch }}"
-      RID: |-
-        ${{
-          case(
-            inputs.target == 'macos', format('osx-{0}', matrix.arch),
-            inputs.target == 'windows', format('win-{0}', matrix.arch),
-            format('{0}-{1}', inputs.target, matrix.arch)
-          )
-        }}
-      Project: ${{ inputs.project }}
-      ExtOpt: |-
-        ${{
-          case(
-            inputs.target == 'windows', '-p:EnableWindowsTargeting=true',
-            ''
-          )
-        }}
+      Output: "${{ github.workspace }}/x64"
+      RID: win-x64
+      Project: './v2rayN/v2rayN.csproj'
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v6.0.2
+      uses: actions/checkout@v4
       with:
         submodules: 'recursive'
         fetch-depth: '0'
 
+    - name: Apply patch
+      working-directory: ./v2rayN
+      run: git apply ../v2rayN-outbound-interface-fixed.patch
+
     - name: Setup .NET
-      uses: actions/setup-dotnet@v5.2.0
+      uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
 
     - name: Build v2rayN
       working-directory: ./v2rayN
-      run: dotnet publish $Project -c Release -r $RID -p:SelfContained=true $ExtOpt -o $Output
+      run: dotnet publish $Project -c Release -r $RID -p:SelfContained=true -p:EnableWindowsTargeting=true -o $Output
 
     - name: Build AmazTool
       working-directory: ./v2rayN
-      run: dotnet publish ./AmazTool/AmazTool.csproj -c Release -r $RID -p:SelfContained=true -p:PublishTrimmed=true $ExtOpt -o $Output
+      run: dotnet publish ./AmazTool/AmazTool.csproj -c Release -r $RID -p:SelfContained=true -p:PublishTrimmed=true -p:EnableWindowsTargeting=true -o $Output
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v7.0.1
+      uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.arch }}
-        path: ${{ matrix.arch }}
+        name: v2rayN-windows-x64
+        path: x64

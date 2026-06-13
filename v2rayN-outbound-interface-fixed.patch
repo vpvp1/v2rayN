@@ -1,0 +1,1273 @@
+diff --git a/v2rayN/ServiceLib/Events/AppEvents.cs b/v2rayN/ServiceLib/Events/AppEvents.cs
+index 5824bfc..ecc44a9 100644
+--- a/v2rayN/ServiceLib/Events/AppEvents.cs
++++ b/v2rayN/ServiceLib/Events/AppEvents.cs
+@@ -27,4 +27,24 @@ public static class AppEvents
+     public static readonly EventChannel<Unit> TestServerRequested = new();
+     public static readonly EventChannel<Unit> InboundDisplayRequested = new();
+     public static readonly EventChannel<ESysProxyType> SysProxyChangeRequested = new();
++
++    /// <summary>
++    /// Published whenever the user toggles Auto Switch on/off (e.g. from the
++    /// status bar or tray menu), or changes the rotation interval.
++    /// </summary>
++    public static readonly EventChannel<bool> AutoSwitchToggleRequested = new();
++
++    /// <summary>
++    /// Published whenever the set of profiles enabled for Auto Switch, or their
++    /// rotation order, changes (e.g. checkbox/order edited in the Profiles grid).
++    /// Lets AutoSwitchManager refresh its rotation list.
++    /// </summary>
++    public static readonly EventChannel<Unit> AutoSwitchListChanged = new();
++
++    /// <summary>
++    /// Published by AutoSwitchManager whenever the active rotation state changes
++    /// (enabled/disabled, or interval updated), so UI elements (status bar, tray)
++    /// can refresh their display.
++    /// </summary>
++    public static readonly EventChannel<Unit> AutoSwitchStateChanged = new();
+ }
+diff --git a/v2rayN/ServiceLib/Handler/ConfigHandler.cs b/v2rayN/ServiceLib/Handler/ConfigHandler.cs
+index 54a0108..70b5ef5 100644
+--- a/v2rayN/ServiceLib/Handler/ConfigHandler.cs
++++ b/v2rayN/ServiceLib/Handler/ConfigHandler.cs
+@@ -169,6 +169,7 @@ public static class ConfigHandler
+             Interval = "10-20"
+         };
+         config.GlobalHotkeys ??= new();
++        config.AutoSwitchItem ??= new();
+ 
+         if (config.SystemProxyItem.SystemProxyExceptions.IsNullOrEmpty())
+         {
+diff --git a/v2rayN/ServiceLib/Handler/CoreConfigHandler.cs b/v2rayN/ServiceLib/Handler/CoreConfigHandler.cs
+index 99f6566..01533e0 100644
+--- a/v2rayN/ServiceLib/Handler/CoreConfigHandler.cs
++++ b/v2rayN/ServiceLib/Handler/CoreConfigHandler.cs
+@@ -68,8 +68,15 @@ public static class CoreConfigHandler
+                 ret.Msg = ResUI.FailedGenDefaultConfiguration;
+                 return ret;
+             }
+-            File.Copy(addressFileName, fileName);
+-            File.SetAttributes(fileName, FileAttributes.Normal); //Copy will keep the attributes of addressFileName, so we need to add write permissions to fileName just in case of addressFileName is a read-only file.
++            // Outbound Interface patch: inject sendThrough into custom config
++            var customContent = await File.ReadAllTextAsync(addressFileName);
++            var outboundInterface = AppManager.Instance.Config.CoreBasicItem.OutboundInterface?.Trim();
++            if (!string.IsNullOrEmpty(outboundInterface))
++            {
++                customContent = InjectSendThroughIntoJson(customContent, outboundInterface);
++            }
++            await File.WriteAllTextAsync(fileName, customContent);
++            File.SetAttributes(fileName, FileAttributes.Normal);
+ 
+             //check again
+             if (!File.Exists(fileName))
+@@ -90,6 +97,67 @@ public static class CoreConfigHandler
+         }
+     }
+ 
++    private static string InjectSendThroughIntoJson(string json, string interfaceIP)
++    {
++        try
++        {
++            var root = System.Text.Json.Nodes.JsonNode.Parse(json)?.AsObject();
++            if (root == null) return json;
++
++            // Patch outbounds
++            if (root["outbounds"] is System.Text.Json.Nodes.JsonArray outbounds)
++            {
++                foreach (var item in outbounds)
++                {
++                    var ob = item?.AsObject();
++                    if (ob == null) continue;
++                    var proto = ob["protocol"]?.GetValue<string>() ?? string.Empty;
++                    if (proto is "freedom" or "blackhole" or "dns" or "loopback")
++                        continue;
++                    ob.Remove("sendThrough");
++                    ob.Add("sendThrough", System.Text.Json.Nodes.JsonValue.Create(interfaceIP));
++                }
++            }
++
++            // Patch DNS servers
++            if (root["dns"]?.AsObject() is System.Text.Json.Nodes.JsonObject dnsObj &&
++                dnsObj["servers"] is System.Text.Json.Nodes.JsonArray dnsServers)
++            {
++                var patched = new System.Text.Json.Nodes.JsonArray();
++                foreach (var entry in dnsServers)
++                {
++                    if (entry is System.Text.Json.Nodes.JsonValue strVal &&
++                        strVal.TryGetValue<string>(out var addr))
++                    {
++                        patched.Add(new System.Text.Json.Nodes.JsonObject
++                        {
++                            ["address"]     = addr,
++                            ["sendThrough"] = interfaceIP
++                        });
++                    }
++                    else if (entry?.AsObject() is System.Text.Json.Nodes.JsonObject obj)
++                    {
++                        obj.Remove("sendThrough");
++                        obj.Add("sendThrough", System.Text.Json.Nodes.JsonValue.Create(interfaceIP));
++                        patched.Add(System.Text.Json.Nodes.JsonNode.Parse(obj.ToJsonString()));
++                    }
++                    else
++                    {
++                        patched.Add(entry?.DeepClone());
++                    }
++                }
++                dnsObj.Remove("servers");
++                dnsObj.Add("servers", patched);
++            }
++
++            return root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
++        }
++        catch
++        {
++            return json;
++        }
++    }
++
+     public static async Task<RetResult> GenerateClientSpeedtestConfig(Config config, string fileName, List<ServerTestItem> selecteds, ECoreType coreType)
+     {
+         var result = new RetResult();
+diff --git a/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs b/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs
+new file mode 100644
+index 0000000..e4690be
+--- /dev/null
++++ b/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs
+@@ -0,0 +1,265 @@
++namespace ServiceLib.Manager;
++
++/// <summary>
++/// Drives automatic, timer-based rotation between a user-selected set of
++/// configs (profiles). The user enables a profile for rotation and assigns it
++/// a position via the "Auto Switch" checkbox + "Order" columns in the Profiles
++/// grid, then enables the overall feature (and sets the interval, in seconds)
++/// from the status bar toggle or tray menu.
++///
++/// Rotation order is always sequential (1, 2, 3, ... 1, 2, 3, ...), following
++/// the AutoSwitchOrder values assigned to each enabled profile.
++/// </summary>
++public class AutoSwitchManager
++{
++    private static readonly Lazy<AutoSwitchManager> _instance = new(() => new());
++    public static AutoSwitchManager Instance => _instance.Value;
++
++    private static readonly string _tag = "AutoSwitchManager";
++
++    private Config? _config;
++    private System.Timers.Timer? _timer;
++    private readonly object _syncRoot = new();
++    private int _currentRotationIndex = -1;
++    private bool _initialized;
++
++    private AutoSwitchManager()
++    {
++    }
++
++    /// <summary>
++    /// Initializes the manager. Safe to call multiple times; only the first
++    /// call has effect. If Auto Switch was left enabled from a previous
++    /// session, the rotation timer is started immediately.
++    /// </summary>
++    public Task Init(Config config)
++    {
++        _config = config;
++
++        if (!_initialized)
++        {
++            _initialized = true;
++
++            AppEvents.AutoSwitchToggleRequested
++                .AsObservable()
++                .Subscribe(enabled => _ = SetEnabled(enabled));
++
++            AppEvents.AutoSwitchListChanged
++                .AsObservable()
++                .Subscribe(_ => OnRotationListChanged());
++
++            if (_config.AutoSwitchItem?.Enabled == true)
++            {
++                _ = SetEnabled(true);
++            }
++        }
++
++        return Task.CompletedTask;
++    }
++
++    /// <summary>
++    /// Whether Auto Switch is currently active.
++    /// </summary>
++    public bool IsEnabled => _config?.AutoSwitchItem?.Enabled == true;
++
++    /// <summary>
++    /// Current rotation interval, in seconds.
++    /// </summary>
++    public int IntervalSeconds => Math.Max(1, _config?.AutoSwitchItem?.IntervalSeconds ?? 60);
++
++    /// <summary>
++    /// Enables or disables the Auto Switch rotation, persists the setting, and
++    /// starts/stops the underlying timer accordingly.
++    /// </summary>
++    public async Task SetEnabled(bool enabled)
++    {
++        if (_config?.AutoSwitchItem is null)
++        {
++            return;
++        }
++
++        if (enabled)
++        {
++            var rotation = ProfileExManager.Instance.GetAutoSwitchItemsOrdered();
++            if (rotation.Count == 0)
++            {
++                Logging.SaveLog(_tag, new InvalidOperationException("No profiles selected for Auto Switch."));
++                enabled = false;
++            }
++        }
++
++        _config.AutoSwitchItem.Enabled = enabled;
++        await ConfigHandler.SaveConfig(_config);
++
++        if (enabled)
++        {
++            StartTimer();
++        }
++        else
++        {
++            StopTimer();
++        }
++
++        AppEvents.AutoSwitchStateChanged.Publish();
++    }
++
++    /// <summary>
++    /// Updates the rotation interval (in seconds), persists it, and restarts
++    /// the timer (if running) so the new interval takes effect immediately.
++    /// </summary>
++    public async Task SetIntervalSeconds(int seconds)
++    {
++        if (_config?.AutoSwitchItem is null)
++        {
++            return;
++        }
++
++        seconds = Math.Max(1, seconds);
++        if (_config.AutoSwitchItem.IntervalSeconds == seconds)
++        {
++            return;
++        }
++
++        _config.AutoSwitchItem.IntervalSeconds = seconds;
++        await ConfigHandler.SaveConfig(_config);
++
++        if (IsEnabled)
++        {
++            StartTimer();
++        }
++
++        AppEvents.AutoSwitchStateChanged.Publish();
++    }
++
++    /// <summary>
++    /// Called when the set of profiles enabled for rotation (or their order)
++    /// changes. If rotation is currently running and the list becomes empty,
++    /// rotation is stopped automatically.
++    /// </summary>
++    private void OnRotationListChanged()
++    {
++        if (!IsEnabled)
++        {
++            return;
++        }
++
++        var rotation = ProfileExManager.Instance.GetAutoSwitchItemsOrdered();
++        if (rotation.Count == 0)
++        {
++            _ = SetEnabled(false);
++            return;
++        }
++
++        // Keep the timer running; the next tick will simply re-evaluate the
++        // (possibly changed) rotation list.
++        lock (_syncRoot)
++        {
++            if (_currentRotationIndex >= rotation.Count)
++            {
++                _currentRotationIndex = -1;
++            }
++        }
++    }
++
++    private void StartTimer()
++    {
++        StopTimer();
++
++        lock (_syncRoot)
++        {
++            _currentRotationIndex = -1;
++            _timer = new System.Timers.Timer(IntervalSeconds * 1000d)
++            {
++                AutoReset = true,
++            };
++            _timer.Elapsed += (_, _) => _ = OnTimerElapsed();
++            _timer.Start();
++        }
++
++        Logging.SaveLog($"{_tag} - started, interval = {IntervalSeconds}s");
++    }
++
++    private void StopTimer()
++    {
++        lock (_syncRoot)
++        {
++            if (_timer != null)
++            {
++                _timer.Stop();
++                _timer.Dispose();
++                _timer = null;
++            }
++            _currentRotationIndex = -1;
++        }
++
++        Logging.SaveLog($"{_tag} - stopped");
++    }
++
++    private async Task OnTimerElapsed()
++    {
++        try
++        {
++            await SwitchToNextProfile();
++        }
++        catch (Exception ex)
++        {
++            Logging.SaveLog(_tag, ex);
++        }
++    }
++
++    /// <summary>
++    /// Advances the rotation by one step (sequentially, looping back to the
++    /// start) and switches the active server to that profile.
++    /// </summary>
++    private async Task SwitchToNextProfile()
++    {
++        if (_config is null || !IsEnabled)
++        {
++            return;
++        }
++
++        var rotation = ProfileExManager.Instance.GetAutoSwitchItemsOrdered();
++        if (rotation.Count == 0)
++        {
++            await SetEnabled(false);
++            return;
++        }
++
++        int nextIndex;
++        lock (_syncRoot)
++        {
++            nextIndex = (_currentRotationIndex + 1) % rotation.Count;
++            _currentRotationIndex = nextIndex;
++        }
++
++        var nextIndexId = rotation[nextIndex].IndexId;
++        if (nextIndexId.IsNullOrEmpty())
++        {
++            return;
++        }
++
++        if (nextIndexId == _config.IndexId)
++        {
++            // Already the active server; still counts as a rotation step, but
++            // there's nothing to switch.
++            return;
++        }
++
++        var item = await AppManager.Instance.GetProfileItem(nextIndexId);
++        if (item is null)
++        {
++            // The profile may have been deleted; drop it from the rotation and
++            // try again on the next tick rather than blocking the cycle.
++            ProfileExManager.Instance.RemoveFromAutoSwitch(nextIndexId);
++            await ProfileExManager.Instance.SaveTo();
++            return;
++        }
++
++        if (await ConfigHandler.SetDefaultServerIndex(_config, nextIndexId) == 0)
++        {
++            Logging.SaveLog($"{_tag} - switched to: {item.GetSummary()}");
++            AppEvents.ProfilesRefreshRequested.Publish();
++            AppEvents.ReloadRequested.Publish();
++        }
++    }
++}
+diff --git a/v2rayN/ServiceLib/Manager/ProfileExManager.cs b/v2rayN/ServiceLib/Manager/ProfileExManager.cs
+index 739bd55..0948a65 100644
+--- a/v2rayN/ServiceLib/Manager/ProfileExManager.cs
++++ b/v2rayN/ServiceLib/Manager/ProfileExManager.cs
+@@ -96,7 +96,9 @@ public class ProfileExManager
+             Delay = 0,
+             Speed = 0,
+             Sort = 0,
+-            Message = string.Empty
++            Message = string.Empty,
++            AutoSwitchEnabled = false,
++            AutoSwitchOrder = 0
+         };
+         _lstProfileEx.Add(profileEx);
+         IndexIdEnqueue(indexId);
+@@ -176,4 +178,189 @@ public class ProfileExManager
+         }
+         return _lstProfileEx.Max(t => t == null ? 0 : t.Sort);
+     }
++
++    #region Auto Switch
++
++    /// <summary>
++    /// Returns whether the given profile is included in the Auto Switch rotation.
++    /// </summary>
++    public bool GetAutoSwitchEnabled(string indexId)
++    {
++        var profileEx = _lstProfileEx.FirstOrDefault(t => t.IndexId == indexId);
++        return profileEx?.AutoSwitchEnabled ?? false;
++    }
++
++    /// <summary>
++    /// Returns the Auto Switch rotation order (1-based) for the given profile.
++    /// 0 means the profile has not been assigned an order yet.
++    /// </summary>
++    public int GetAutoSwitchOrder(string indexId)
++    {
++        var profileEx = _lstProfileEx.FirstOrDefault(t => t.IndexId == indexId);
++        return profileEx?.AutoSwitchOrder ?? 0;
++    }
++
++    /// <summary>
++    /// Returns the highest Auto Switch order currently assigned among enabled profiles.
++    /// </summary>
++    public int GetMaxAutoSwitchOrder()
++    {
++        if (_lstProfileEx.Count <= 0)
++        {
++            return 0;
++        }
++        return _lstProfileEx.Where(t => t != null && t.AutoSwitchEnabled).Select(t => t.AutoSwitchOrder).DefaultIfEmpty(0).Max();
++    }
++
++    /// <summary>
++    /// Returns all profiles currently enabled for Auto Switch, ordered by their
++    /// rotation order (ascending).
++    /// </summary>
++    public List<ProfileExItem> GetAutoSwitchItemsOrdered()
++    {
++        return _lstProfileEx
++            .Where(t => t != null && t.AutoSwitchEnabled)
++            .OrderBy(t => t.AutoSwitchOrder)
++            .ThenBy(t => t.IndexId)
++            .ToList();
++    }
++
++    /// <summary>
++    /// Enables or disables a profile for the Auto Switch rotation.
++    /// When enabling without an explicit order, the profile is appended to the
++    /// end of the rotation. When disabling, the profile's order is cleared and
++    /// the remaining enabled profiles are re-indexed to stay contiguous (1..N).
++    /// </summary>
++    public void SetAutoSwitchEnabled(string indexId, bool enabled)
++    {
++        var profileEx = GetProfileExItem(indexId);
++
++        profileEx.AutoSwitchEnabled = enabled;
++        if (enabled)
++        {
++            if (profileEx.AutoSwitchOrder <= 0)
++            {
++                profileEx.AutoSwitchOrder = GetMaxAutoSwitchOrder() + 1;
++            }
++        }
++        else
++        {
++            profileEx.AutoSwitchOrder = 0;
++        }
++
++        IndexIdEnqueue(indexId);
++        ReindexAutoSwitchOrders();
++    }
++
++    /// <summary>
++    /// Sets (or changes) the Auto Switch rotation order for a profile.
++    /// If the requested order collides with another enabled profile, the
++    /// profile being edited wins (last value entered wins) and the rest of
++    /// the rotation is re-indexed sequentially (1..N) to remain contiguous.
++    /// Setting an order automatically enables the profile for Auto Switch.
++    /// </summary>
++    public void SetAutoSwitchOrder(string indexId, int order)
++    {
++        var profileEx = GetProfileExItem(indexId);
++
++        if (order <= 0)
++        {
++            // Treat 0/negative as "remove from rotation".
++            SetAutoSwitchEnabled(indexId, false);
++            return;
++        }
++
++        profileEx.AutoSwitchEnabled = true;
++        profileEx.AutoSwitchOrder = order;
++
++        IndexIdEnqueue(indexId);
++        ReindexAutoSwitchOrders(indexId);
++    }
++
++    /// <summary>
++    /// Re-indexes the AutoSwitchOrder of all enabled profiles so that they form
++    /// a contiguous sequence starting at 1, preserving relative order.
++    /// If <paramref name="preferredIndexId"/> is provided and multiple profiles
++    /// share the same order value as it, that profile keeps its requested order
++    /// (i.e. "last value entered wins") and the conflicting profiles are shifted.
++    /// </summary>
++    private void ReindexAutoSwitchOrders(string? preferredIndexId = null)
++    {
++        var enabled = _lstProfileEx.Where(t => t != null && t.AutoSwitchEnabled).ToList();
++        if (enabled.Count == 0)
++        {
++            return;
++        }
++
++        IEnumerable<ProfileExItem> ordered;
++        if (preferredIndexId.IsNotEmpty())
++        {
++            var preferred = enabled.FirstOrDefault(t => t.IndexId == preferredIndexId);
++            var others = enabled.Where(t => t.IndexId != preferredIndexId)
++                                 .OrderBy(t => t.AutoSwitchOrder)
++                                 .ThenBy(t => t.IndexId);
++
++            if (preferred != null)
++            {
++                // Place the preferred item at its requested position, shifting others.
++                var result = new List<ProfileExItem>();
++                var inserted = false;
++                var position = 1;
++                foreach (var item in others)
++                {
++                    if (!inserted && position == preferred.AutoSwitchOrder)
++                    {
++                        result.Add(preferred);
++                        inserted = true;
++                    }
++                    result.Add(item);
++                    position++;
++                }
++                if (!inserted)
++                {
++                    result.Add(preferred);
++                }
++                ordered = result;
++            }
++            else
++            {
++                ordered = enabled.OrderBy(t => t.AutoSwitchOrder).ThenBy(t => t.IndexId);
++            }
++        }
++        else
++        {
++            ordered = enabled.OrderBy(t => t.AutoSwitchOrder).ThenBy(t => t.IndexId);
++        }
++
++        var seq = 1;
++        foreach (var item in ordered)
++        {
++            if (item.AutoSwitchOrder != seq)
++            {
++                item.AutoSwitchOrder = seq;
++                IndexIdEnqueue(item.IndexId);
++            }
++            seq++;
++        }
++    }
++
++    /// <summary>
++    /// Removes a profile entirely from the Auto Switch rotation (used e.g. when
++    /// a server is deleted) and re-indexes the remaining profiles.
++    /// </summary>
++    public void RemoveFromAutoSwitch(string indexId)
++    {
++        var profileEx = _lstProfileEx.FirstOrDefault(t => t.IndexId == indexId);
++        if (profileEx == null || !profileEx.AutoSwitchEnabled)
++        {
++            return;
++        }
++
++        profileEx.AutoSwitchEnabled = false;
++        profileEx.AutoSwitchOrder = 0;
++        IndexIdEnqueue(indexId);
++        ReindexAutoSwitchOrders();
++    }
++
++    #endregion Auto Switch
+ }
+diff --git a/v2rayN/ServiceLib/Models/Config.cs b/v2rayN/ServiceLib/Models/Config.cs
+index 738ee28..702e899 100644
+--- a/v2rayN/ServiceLib/Models/Config.cs
++++ b/v2rayN/ServiceLib/Models/Config.cs
+@@ -30,6 +30,7 @@ public class Config
+     public WebDavItem WebDavItem { get; set; }
+     public CheckUpdateItem CheckUpdateItem { get; set; }
+     public Fragment4RayItem? Fragment4RayItem { get; set; }
++    public AutoSwitchItem? AutoSwitchItem { get; set; }
+     public List<InItem> Inbound { get; set; }
+     public List<KeyEventItem> GlobalHotkeys { get; set; }
+     public List<CoreTypeItem> CoreTypeItem { get; set; }
+diff --git a/v2rayN/ServiceLib/Models/ConfigItems.cs b/v2rayN/ServiceLib/Models/ConfigItems.cs
+index b23a8fc..4ddf529 100644
+--- a/v2rayN/ServiceLib/Models/ConfigItems.cs
++++ b/v2rayN/ServiceLib/Models/ConfigItems.cs
+@@ -19,6 +19,8 @@ public class CoreBasicItem
+ 
+     public string? BindInterface { get; set; }
+ 
++    public string? OutboundInterface { get; set; }
++
+     public bool EnableFragment { get; set; }
+ 
+     public bool EnableCacheFile4Sbox { get; set; } = true;
+@@ -85,6 +87,20 @@ public class MsgUIItem
+     public bool? AutoRefresh { get; set; }
+ }
+ 
++[Serializable]
++public class AutoSwitchItem
++{
++    /// <summary>
++    /// Whether automatic config rotation (Auto Switch) is currently enabled.
++    /// </summary>
++    public bool Enabled { get; set; }
++
++    /// <summary>
++    /// Rotation interval, in seconds, between automatic config switches.
++    /// </summary>
++    public int IntervalSeconds { get; set; } = 60;
++}
++
+ [Serializable]
+ public class UIItem
+ {
+diff --git a/v2rayN/ServiceLib/Models/ProfileExItem.cs b/v2rayN/ServiceLib/Models/ProfileExItem.cs
+index 33b20c5..f7d0218 100644
+--- a/v2rayN/ServiceLib/Models/ProfileExItem.cs
++++ b/v2rayN/ServiceLib/Models/ProfileExItem.cs
+@@ -10,4 +10,16 @@ public class ProfileExItem
+     public decimal Speed { get; set; }
+     public int Sort { get; set; }
+     public string? Message { get; set; }
++
++    /// <summary>
++    /// Whether this profile is included in the Auto Switch rotation.
++    /// </summary>
++    public bool AutoSwitchEnabled { get; set; }
++
++    /// <summary>
++    /// Position of this profile within the Auto Switch rotation order (1-based).
++    /// 0 means "not assigned yet" - the order will be auto-assigned when the
++    /// AutoSwitchEnabled checkbox is checked.
++    /// </summary>
++    public int AutoSwitchOrder { get; set; }
+ }
+diff --git a/v2rayN/ServiceLib/Models/ProfileItemModel.cs b/v2rayN/ServiceLib/Models/ProfileItemModel.cs
+index 53170f1..7222cc6 100644
+--- a/v2rayN/ServiceLib/Models/ProfileItemModel.cs
++++ b/v2rayN/ServiceLib/Models/ProfileItemModel.cs
+@@ -38,6 +38,18 @@ public class ProfileItemModel : ReactiveObject
+     [Reactive]
+     public string TotalDown { get; set; }
+ 
++    /// <summary>
++    /// Whether this profile is included in the Auto Switch rotation (checkbox column).
++    /// </summary>
++    [Reactive]
++    public bool AutoSwitchEnabled { get; set; }
++
++    /// <summary>
++    /// Position of this profile within the Auto Switch rotation order (editable column).
++    /// </summary>
++    [Reactive]
++    public int AutoSwitchOrder { get; set; }
++
+     public string GetSummary()
+     {
+         var summary = $"[{ConfigType}] {Remarks}";
+diff --git a/v2rayN/ServiceLib/Models/V2rayConfig.cs b/v2rayN/ServiceLib/Models/V2rayConfig.cs
+index 10420da..6bf1fcd 100644
+--- a/v2rayN/ServiceLib/Models/V2rayConfig.cs
++++ b/v2rayN/ServiceLib/Models/V2rayConfig.cs
+@@ -237,6 +237,7 @@ public class DnsServer4Ray
+     public bool? skipFallback { get; set; }
+     public List<string>? expectedIPs { get; set; }
+     public string? tag { get; set; }
++    public string? sendThrough { get; set; }
+ }
+ 
+ public class Routing4Ray
+diff --git a/v2rayN/ServiceLib/Services/CoreConfig/V2ray/CoreConfigV2rayService.cs b/v2rayN/ServiceLib/Services/CoreConfig/V2ray/CoreConfigV2rayService.cs
+index 85963bb..4633259 100644
+--- a/v2rayN/ServiceLib/Services/CoreConfig/V2ray/CoreConfigV2rayService.cs
++++ b/v2rayN/ServiceLib/Services/CoreConfig/V2ray/CoreConfigV2rayService.cs
+@@ -62,6 +62,7 @@ public partial class CoreConfigV2rayService(CoreConfigContext context)
+             }
+             ApplyOutboundBindInterface();
+             ApplyOutboundSendThrough();
++            ApplyOutboundSendThroughInterface();
+ 
+             var finalRule = BuildFinalRule();
+             if (!string.IsNullOrEmpty(finalRule?.balancerTag))
+@@ -206,6 +207,7 @@ public partial class CoreConfigV2rayService(CoreConfigContext context)
+             }
+             ApplyOutboundBindInterface();
+             ApplyOutboundSendThrough();
++            ApplyOutboundSendThroughInterface();
+             //ret.Msg =string.Format(ResUI.SuccessfulConfiguration"), node.getSummary());
+             ret.Success = true;
+             ret.Data = JsonUtils.Serialize(_coreConfig);
+@@ -278,6 +280,7 @@ public partial class CoreConfigV2rayService(CoreConfigContext context)
+             }
+             ApplyOutboundBindInterface();
+             ApplyOutboundSendThrough();
++            ApplyOutboundSendThroughInterface();
+ 
+             ret.Msg = string.Format(ResUI.SuccessfulConfiguration, "");
+             ret.Success = true;
+diff --git a/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayConfigTemplateService.cs b/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayConfigTemplateService.cs
+index a218ac1..eb66d13 100644
+--- a/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayConfigTemplateService.cs
++++ b/v2rayN/ServiceLib/Services/CoreConfig/V2ray/V2rayConfigTemplateService.cs
+@@ -185,6 +185,48 @@ public partial class CoreConfigV2rayService
+         }
+     }
+ 
++    private void ApplyOutboundSendThroughInterface()
++    {
++        var outboundInterface = _config.CoreBasicItem.OutboundInterface?.TrimEx();
++        if (outboundInterface.IsNullOrEmpty())
++        {
++            return;
++        }
++
++        // Set sendThrough on all applicable outbounds
++        foreach (var outbound in _coreConfig.outbounds ?? [])
++        {
++            outbound.sendThrough = ShouldBindNet(outbound) ? outboundInterface : null;
++        }
++
++        // Set sendThrough on all DNS servers
++        if (_coreConfig.dns is Dns4Ray dns4Ray && dns4Ray.servers != null)
++        {
++            var patchedServers = new List<object>();
++            foreach (var serverEntry in dns4Ray.servers)
++            {
++                if (serverEntry is string strServer)
++                {
++                    patchedServers.Add(new DnsServer4Ray
++                    {
++                        address = strServer,
++                        sendThrough = outboundInterface
++                    });
++                }
++                else if (serverEntry is DnsServer4Ray dnsServer)
++                {
++                    dnsServer.sendThrough = outboundInterface;
++                    patchedServers.Add(dnsServer);
++                }
++                else if (serverEntry != null)
++                {
++                    patchedServers.Add(serverEntry);
++                }
++            }
++            dns4Ray.servers = patchedServers;
++        }
++    }
++
+     private static bool ShouldBindNet(Outbounds4Ray outbound)
+     {
+         if (outbound.protocol is "freedom" or "blackhole" or "dns" or "loopback")
+diff --git a/v2rayN/ServiceLib/ViewModels/MainWindowViewModel.cs b/v2rayN/ServiceLib/ViewModels/MainWindowViewModel.cs
+index 53ad06c..eac3bd1 100644
+--- a/v2rayN/ServiceLib/ViewModels/MainWindowViewModel.cs
++++ b/v2rayN/ServiceLib/ViewModels/MainWindowViewModel.cs
+@@ -264,6 +264,7 @@ public class MainWindowViewModel : MyReactiveObject
+         await ConfigHandler.InitBuiltinDNS(_config);
+         await ConfigHandler.InitBuiltinFullConfigTemplate(_config);
+         await ProfileExManager.Instance.Init();
++        await AutoSwitchManager.Instance.Init(_config);
+         await CoreManager.Instance.Init(_config, UpdateHandler);
+         TaskManager.Instance.RegUpdateTask(_config, UpdateTaskHandler);
+ 
+diff --git a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+index 609ae0d..52b3644 100644
+--- a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
++++ b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+@@ -440,7 +440,9 @@ public class ProfilesViewModel : MyReactiveObject
+                         TodayDown = t22 == null ? "" : Utils.HumanFy(t22.TodayDown),
+                         TodayUp = t22 == null ? "" : Utils.HumanFy(t22.TodayUp),
+                         TotalDown = t22 == null ? "" : Utils.HumanFy(t22.TotalDown),
+-                        TotalUp = t22 == null ? "" : Utils.HumanFy(t22.TotalUp)
++                        TotalUp = t22 == null ? "" : Utils.HumanFy(t22.TotalUp),
++                        AutoSwitchEnabled = t33?.AutoSwitchEnabled ?? false,
++                        AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0
+                     }).OrderBy(t => t.Sort).ToList();
+ 
+         return lstModel;
+@@ -448,6 +450,50 @@ public class ProfilesViewModel : MyReactiveObject
+ 
+     #endregion Servers && Groups
+ 
++    #region Auto Switch column
++
++    /// <summary>
++    /// Called when the user (un)checks the "Auto Switch" checkbox for a profile
++    /// row. Persists the change and refreshes the grid so the Order column
++    /// reflects the (possibly re-indexed) rotation order.
++    /// </summary>
++    public async Task AutoSwitchToggled(ProfileItemModel? item)
++    {
++        if (item is null || item.IndexId.IsNullOrEmpty())
++        {
++            return;
++        }
++
++        ProfileExManager.Instance.SetAutoSwitchEnabled(item.IndexId, item.AutoSwitchEnabled);
++        await ProfileExManager.Instance.SaveTo();
++
++        AppEvents.AutoSwitchListChanged.Publish();
++        await RefreshServers();
++    }
++
++    /// <summary>
++    /// Called when the user manually edits the "Order" cell for a profile row.
++    /// A value of 0 (or empty) removes the profile from the rotation. Any other
++    /// positive value enables the profile for the rotation at that position;
++    /// if the value collides with another profile's order, the value just
++    /// entered wins and the remaining profiles are re-indexed (1..N).
++    /// </summary>
++    public async Task AutoSwitchOrderChanged(ProfileItemModel? item)
++    {
++        if (item is null || item.IndexId.IsNullOrEmpty())
++        {
++            return;
++        }
++
++        ProfileExManager.Instance.SetAutoSwitchOrder(item.IndexId, item.AutoSwitchOrder);
++        await ProfileExManager.Instance.SaveTo();
++
++        AppEvents.AutoSwitchListChanged.Publish();
++        await RefreshServers();
++    }
++
++    #endregion Auto Switch column
++
+     #region Add Servers
+ 
+     private async Task<List<ProfileItem>?> GetProfileItems(bool latest)
+@@ -522,6 +568,14 @@ public class ProfilesViewModel : MyReactiveObject
+         var exists = lstSelected.Exists(t => t.IndexId == _config.IndexId);
+ 
+         await ConfigHandler.RemoveServers(_config, lstSelected);
++
++        foreach (var sel in lstSelected)
++        {
++            ProfileExManager.Instance.RemoveFromAutoSwitch(sel.IndexId);
++        }
++        await ProfileExManager.Instance.SaveTo();
++        AppEvents.AutoSwitchListChanged.Publish();
++
+         NoticeManager.Instance.Enqueue(ResUI.OperationSuccess);
+         if (lstSelected.Count == ProfileItems.Count)
+         {
+diff --git a/v2rayN/ServiceLib/ViewModels/StatusBarViewModel.cs b/v2rayN/ServiceLib/ViewModels/StatusBarViewModel.cs
+index 0ce40db..9f23c04 100644
+--- a/v2rayN/ServiceLib/ViewModels/StatusBarViewModel.cs
++++ b/v2rayN/ServiceLib/ViewModels/StatusBarViewModel.cs
+@@ -90,6 +90,26 @@ public class StatusBarViewModel : MyReactiveObject
+     [Reactive]
+     public bool BlIsNonWindows { get; set; }
+ 
++    [Reactive]
++    public List<ComboItem> OutboundInterfaces { get; set; } = [];
++
++    [Reactive]
++    public ComboItem? SelectedOutboundInterface { get; set; }
++
++    /// <summary>
++    /// Whether automatic config rotation (Auto Switch) is currently enabled.
++    /// Bound to the toggle in the status bar and the tray menu.
++    /// </summary>
++    [Reactive]
++    public bool AutoSwitchEnabled { get; set; }
++
++    /// <summary>
++    /// Rotation interval, in seconds, between automatic config switches.
++    /// Bound to a text box in the status bar and tray menu.
++    /// </summary>
++    [Reactive]
++    public string AutoSwitchIntervalSecondsText { get; set; } = "60";
++
+     #endregion UI
+ 
+     public StatusBarViewModel(Func<EViewAction, object?, Task<bool>>? updateView)
+@@ -189,6 +209,29 @@ public class StatusBarViewModel : MyReactiveObject
+             await SetListenerType(ESysProxyType.Pac);
+         });
+ 
++        // Outbound Interface: watch selection changes
++        this.WhenAnyValue(x => x.SelectedOutboundInterface)
++            .Subscribe(item => OutboundInterfaceSelectedChanged(item));
++
++        InitOutboundInterfaces();
++
++        // Auto Switch: initial state from config
++        AutoSwitchEnabled = _config.AutoSwitchItem?.Enabled == true;
++        AutoSwitchIntervalSecondsText = (_config.AutoSwitchItem?.IntervalSeconds ?? 60).ToString();
++
++        this.WhenAnyValue(x => x.AutoSwitchEnabled)
++            .Skip(1)
++            .Subscribe(enabled => AutoSwitchEnabledChanged(enabled));
++
++        this.WhenAnyValue(x => x.AutoSwitchIntervalSecondsText)
++            .Skip(1)
++            .Subscribe(text => AutoSwitchIntervalChanged(text));
++
++        AppEvents.AutoSwitchStateChanged
++            .AsObservable()
++            .ObserveOn(RxSchedulers.MainThreadScheduler)
++            .Subscribe(_ => RefreshAutoSwitchUi());
++
+         #endregion WhenAnyValue && ReactiveCommand
+ 
+         #region AppEvents
+@@ -567,5 +610,110 @@ public class StatusBarViewModel : MyReactiveObject
+         await Task.CompletedTask;
+     }
+ 
++    #region Outbound Interface
++
++    private void InitOutboundInterfaces()
++    {
++        var interfaces = new List<ComboItem>
++        {
++            new() { ID = string.Empty, Text = "Auto (Default)" }
++        };
++
++        try
++        {
++            foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
++            {
++                if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up)
++                    continue;
++                if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
++                    continue;
++                if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel)
++                    continue;
++
++                foreach (var addr in nic.GetIPProperties().UnicastAddresses)
++                {
++                    if (addr.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
++                        continue;
++
++                    var ip = addr.Address.ToString();
++                    interfaces.Add(new ComboItem
++                    {
++                        ID   = ip,
++                        Text = $"{nic.Name} \u2014 {ip}"
++                    });
++                }
++            }
++        }
++        catch { }
++
++        OutboundInterfaces = interfaces;
++
++        // Restore saved selection
++        var saved = _config.CoreBasicItem.OutboundInterface ?? string.Empty;
++        SelectedOutboundInterface = interfaces.FirstOrDefault(i => i.ID == saved) ?? interfaces[0];
++    }
++
++    private void OutboundInterfaceSelectedChanged(ComboItem? item)
++    {
++        if (item == null) return;
++
++        var newVal = item.ID ?? string.Empty;
++        if (_config.CoreBasicItem.OutboundInterface == newVal)
++            return;
++
++        _config.CoreBasicItem.OutboundInterface = newVal;
++        _ = ConfigHandler.SaveConfig(_config);
++        AppEvents.ReloadRequested.Publish();
++    }
++
++    #endregion Outbound Interface
++
++    #region Auto Switch
++
++    /// <summary>
++    /// Called when the user toggles Auto Switch on/off from the status bar
++    /// toggle button or the tray menu checkbox.
++    /// </summary>
++    private void AutoSwitchEnabledChanged(bool enabled)
++    {
++        AppEvents.AutoSwitchToggleRequested.Publish(enabled);
++    }
++
++    /// <summary>
++    /// Called when the user edits the rotation interval text box (value in
++    /// seconds). Non-numeric or non-positive input is ignored.
++    /// </summary>
++    private void AutoSwitchIntervalChanged(string text)
++    {
++        if (!int.TryParse(text?.Trim(), out var seconds) || seconds <= 0)
++        {
++            return;
++        }
++
++        _ = AutoSwitchManager.Instance.SetIntervalSeconds(seconds);
++    }
++
++    /// <summary>
++    /// Refreshes the status bar / tray toggle and interval display from the
++    /// current AutoSwitchManager state, e.g. after the manager auto-disables
++    /// itself because the rotation list became empty.
++    /// </summary>
++    private void RefreshAutoSwitchUi()
++    {
++        var enabled = AutoSwitchManager.Instance.IsEnabled;
++        if (AutoSwitchEnabled != enabled)
++        {
++            AutoSwitchEnabled = enabled;
++        }
++
++        var interval = AutoSwitchManager.Instance.IntervalSeconds.ToString();
++        if (AutoSwitchIntervalSecondsText != interval)
++        {
++            AutoSwitchIntervalSecondsText = interval;
++        }
++    }
++
++    #endregion Auto Switch
++
+     #endregion UI
+ }
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml b/v2rayN/v2rayN/Views/ProfilesView.xaml
+index 5a25e4c..c40fb4c 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml
+@@ -279,6 +279,26 @@
+                     </Style>
+                 </DataGrid.Resources>
+                 <DataGrid.Columns>
++                    <DataGridCheckBoxColumn
++                        x:Name="colAutoSwitch"
++                        Width="40"
++                        Binding="{Binding AutoSwitchEnabled, UpdateSourceTrigger=PropertyChanged}"
++                        Header="Auto"
++                        IsReadOnly="False"
++                        ToolTip="Include this config in the Auto Switch rotation" />
++                    <DataGridTextColumn
++                        x:Name="colAutoSwitchOrder"
++                        Width="50"
++                        Binding="{Binding AutoSwitchOrder, UpdateSourceTrigger=LostFocus}"
++                        Header="Order"
++                        IsReadOnly="False"
++                        ToolTip="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation.">
++                        <DataGridTextColumn.ElementStyle>
++                            <Style TargetType="{x:Type TextBlock}">
++                                <Setter Property="HorizontalAlignment" Value="Right" />
++                            </Style>
++                        </DataGridTextColumn.ElementStyle>
++                    </DataGridTextColumn>
+                     <base:MyDGTextColumn
+                         Width="80"
+                         Binding="{Binding ConfigType}"
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+index 1db64f3..1a48428 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+@@ -24,6 +24,7 @@ public partial class ProfilesView
+         lstProfiles.PreviewKeyDown += LstProfiles_PreviewKeyDown;
+         lstProfiles.SelectionChanged += LstProfiles_SelectionChanged;
+         lstProfiles.LoadingRow += LstProfiles_LoadingRow;
++        lstProfiles.CellEditEnding += LstProfiles_CellEditEnding;
+         menuSelectAll.Click += menuSelectAll_Click;
+ 
+         if (_config.UiItem.EnableDragDropSort)
+@@ -221,6 +222,41 @@ public partial class ProfilesView
+         e.Row.Header = $" {e.Row.GetIndex() + 1}";
+     }
+ 
++    private void LstProfiles_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
++    {
++        if (e.EditAction != DataGridEditAction.Commit)
++        {
++            return;
++        }
++        if (e.Row.Item is not ProfileItemModel item)
++        {
++            return;
++        }
++
++        var columnName = (e.Column as DataGridBoundColumn)?.Binding is System.Windows.Data.Binding binding
++            ? binding.Path.Path
++            : null;
++
++        if (columnName is not ("AutoSwitchEnabled" or "AutoSwitchOrder"))
++        {
++            return;
++        }
++
++        // Defer until after the binding has written the new value back to the
++        // ViewModel item, then persist the change.
++        Dispatcher.BeginInvoke(async () =>
++        {
++            if (columnName == "AutoSwitchEnabled")
++            {
++                await ViewModel?.AutoSwitchToggled(item);
++            }
++            else
++            {
++                await ViewModel?.AutoSwitchOrderChanged(item);
++            }
++        }, DispatcherPriority.Background);
++    }
++
+     private void LstProfiles_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+     {
+         if (_config.UiItem.DoubleClick2Activate)
+diff --git a/v2rayN/v2rayN/Views/StatusBarView.xaml b/v2rayN/v2rayN/Views/StatusBarView.xaml
+index d337c4c..7fd4fc7 100644
+--- a/v2rayN/v2rayN/Views/StatusBarView.xaml
++++ b/v2rayN/v2rayN/Views/StatusBarView.xaml
+@@ -63,6 +63,32 @@
+                         HorizontalAlignment="Left"
+                         VerticalAlignment="Center"
+                         AutomationProperties.Name="{x:Static resx:ResUI.TbEnableTunAs}" />
++
++                    <TextBlock
++                        Margin="{StaticResource MarginLeftRight8}"
++                        VerticalAlignment="Center"
++                        Style="{StaticResource StatusbarItem}"
++                        Text="Auto Switch" />
++                    <ToggleButton
++                        x:Name="togAutoSwitch"
++                        Margin="{StaticResource Margin4}"
++                        HorizontalAlignment="Left"
++                        VerticalAlignment="Center"
++                        AutomationProperties.Name="Auto Switch"
++                        ToolTip="Automatically rotate between the configs selected in the Servers list, in order, at the interval (in seconds) specified." />
++                    <TextBox
++                        x:Name="txtAutoSwitchInterval"
++                        Width="50"
++                        Margin="{StaticResource MarginLeftRight4}"
++                        VerticalAlignment="Center"
++                        AutomationProperties.Name="Auto Switch Interval (seconds)"
++                        Style="{StaticResource DefTextBox}"
++                        ToolTip="Auto Switch interval, in seconds" />
++                    <TextBlock
++                        Margin="{StaticResource MarginLeftRight4}"
++                        VerticalAlignment="Center"
++                        Style="{StaticResource StatusbarItem}"
++                        Text="sec" />
+                 </StackPanel>
+ 
+                 <StackPanel
+@@ -93,6 +119,17 @@
+                         DisplayMemberPath="Remarks"
+                         FontSize="{DynamicResource StdFontSize}"
+                         Style="{StaticResource MaterialDesignFloatingHintComboBox}" />
++
++                    <ComboBox
++                        x:Name="cmbOutboundInterface"
++                        Width="180"
++                        Margin="{StaticResource MarginLeftRight8}"
++                        materialDesign:HintAssist.Hint="Outbound Interface"
++                        AutomationProperties.Name="Outbound Interface"
++                        DisplayMemberPath="Text"
++                        FontSize="{DynamicResource StdFontSize}"
++                        Style="{StaticResource MaterialDesignFloatingHintComboBox}"
++                        ToolTip="Select network interface for all outbound traffic and DNS. Auto = Windows default." />
+                 </StackPanel>
+ 
+                 <StackPanel Margin="{StaticResource MarginLeftRight8}" VerticalAlignment="Center">
+@@ -203,6 +240,50 @@
+                         </MenuItem.Header>
+                     </MenuItem>
+                     <Separator />
++                    <MenuItem
++                        Height="Auto"
++                        AutomationProperties.Name="Outbound Interface">
++                        <MenuItem.Header>
++                            <DockPanel>
++                                <ComboBox
++                                    x:Name="cmbOutboundInterfaceTray"
++                                    MaxWidth="300"
++                                    materialDesign:HintAssist.Hint="Outbound Interface"
++                                    AutomationProperties.Name="Outbound Interface"
++                                    DisplayMemberPath="Text"
++                                    FontSize="{DynamicResource StdFontSize}"
++                                    Style="{StaticResource MaterialDesignFilledComboBox}" />
++                            </DockPanel>
++                        </MenuItem.Header>
++                    </MenuItem>
++                    <Separator />
++                    <MenuItem
++                        Height="Auto"
++                        AutomationProperties.Name="Auto Switch"
++                        ToolTip="Automatically rotate between the configs selected in the Servers list, in order, at the interval (in seconds) specified.">
++                        <MenuItem.Header>
++                            <StackPanel Orientation="Horizontal">
++                                <ToggleButton
++                                    x:Name="togAutoSwitchTray"
++                                    Margin="{StaticResource MarginRight8}"
++                                    VerticalAlignment="Center"
++                                    AutomationProperties.Name="Auto Switch" />
++                                <TextBlock
++                                    VerticalAlignment="Center"
++                                    Text="Auto Switch" />
++                                <TextBox
++                                    x:Name="txtAutoSwitchIntervalTray"
++                                    Width="50"
++                                    Margin="{StaticResource MarginLeftRight8}"
++                                    VerticalAlignment="Center"
++                                    AutomationProperties.Name="Auto Switch Interval (seconds)"
++                                    Style="{StaticResource DefTextBox}"
++                                    ToolTip="Auto Switch interval, in seconds" />
++                                <TextBlock VerticalAlignment="Center" Text="sec" />
++                            </StackPanel>
++                        </MenuItem.Header>
++                    </MenuItem>
++                    <Separator />
+                     <MenuItem
+                         x:Name="menuAddServerViaClipboard2"
+                         Height="{StaticResource MenuItemHeight}"
+diff --git a/v2rayN/v2rayN/Views/StatusBarView.xaml.cs b/v2rayN/v2rayN/Views/StatusBarView.xaml.cs
+index ab9e16b..85dabdb 100644
+--- a/v2rayN/v2rayN/Views/StatusBarView.xaml.cs
++++ b/v2rayN/v2rayN/Views/StatusBarView.xaml.cs
+@@ -63,6 +63,22 @@ public partial class StatusBarView
+             this.OneWayBind(ViewModel, vm => vm.RoutingItems, v => v.cmbRoutings2.ItemsSource).DisposeWith(disposables);
+             this.Bind(ViewModel, vm => vm.SelectedRouting, v => v.cmbRoutings2.SelectedItem).DisposeWith(disposables);
+             this.OneWayBind(ViewModel, vm => vm.BlRouting, v => v.cmbRoutings2.Visibility).DisposeWith(disposables);
++
++            // Outbound Interface — status bar
++            this.OneWayBind(ViewModel, vm => vm.OutboundInterfaces, v => v.cmbOutboundInterface.ItemsSource).DisposeWith(disposables);
++            this.Bind(ViewModel, vm => vm.SelectedOutboundInterface, v => v.cmbOutboundInterface.SelectedItem).DisposeWith(disposables);
++
++            // Outbound Interface — tray menu
++            this.OneWayBind(ViewModel, vm => vm.OutboundInterfaces, v => v.cmbOutboundInterfaceTray.ItemsSource).DisposeWith(disposables);
++            this.Bind(ViewModel, vm => vm.SelectedOutboundInterface, v => v.cmbOutboundInterfaceTray.SelectedItem).DisposeWith(disposables);
++
++            // Auto Switch — status bar
++            this.Bind(ViewModel, vm => vm.AutoSwitchEnabled, v => v.togAutoSwitch.IsChecked).DisposeWith(disposables);
++            this.Bind(ViewModel, vm => vm.AutoSwitchIntervalSecondsText, v => v.txtAutoSwitchInterval.Text).DisposeWith(disposables);
++
++            // Auto Switch — tray menu
++            this.Bind(ViewModel, vm => vm.AutoSwitchEnabled, v => v.togAutoSwitchTray.IsChecked).DisposeWith(disposables);
++            this.Bind(ViewModel, vm => vm.AutoSwitchIntervalSecondsText, v => v.txtAutoSwitchIntervalTray.Text).DisposeWith(disposables);
+         });
+     }
+ 

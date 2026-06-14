@@ -11,14 +11,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Change commit message
+      - name: Update commit message and touch v2ray folder
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # ایجاد marker داخل پوشه v2ray
+          echo "v-7.21.2_commit_pach" > v2ray/.patch-version
+
+          git add v2ray/.patch-version
+
+          # تغییر پیام آخرین commit
           git commit --amend -m "v-7.21.2_commit_pach"
+
+          # push با بازنویسی تاریخچه
           git push --force

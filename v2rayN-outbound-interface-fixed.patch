@@ -801,7 +801,7 @@ index 53ad06c..eac3bd1 100644
          TaskManager.Instance.RegUpdateTask(_config, UpdateTaskHandler);
  
 diff --git a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
-index 609ae0d..4de7c5e 100644
+index 609ae0d..f0b7ed6 100644
 --- a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
 +++ b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
 @@ -10,6 +10,14 @@ public class ProfilesViewModel : MyReactiveObject
@@ -860,7 +860,7 @@ index 609ae0d..4de7c5e 100644
 +        item.WhenAnyValue(x => x.AutoSwitchEnabled)
 +            .Skip(1)
 +            .DistinctUntilChanged()
-+            .Subscribe(_ =>
++            .Subscribe(enabled =>
 +            {
 +                if (_autoSwitchSyncInProgress)
 +                {
@@ -872,7 +872,7 @@ index 609ae0d..4de7c5e 100644
 +        item.WhenAnyValue(x => x.AutoSwitchOrder)
 +            .Skip(1)
 +            .DistinctUntilChanged()
-+            .Subscribe(_ =>
++            .Subscribe(order =>
 +            {
 +                if (_autoSwitchSyncInProgress)
 +                {

@@ -27,7 +27,7 @@ jobs:
           git add v2rayN/.patch-version
 
           # تغییر پیام آخرین commit
-          git commit --amend -m "v-7.21.2_commit_pach"
+          git commit --amend -m "v-7.21.2_commit_pach_v02"
 
           # push با بازنویسی تاریخچه
           git push --force

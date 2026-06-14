@@ -801,10 +801,38 @@ index 53ad06c..eac3bd1 100644
          TaskManager.Instance.RegUpdateTask(_config, UpdateTaskHandler);
  
 diff --git a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
-index 609ae0d..52b3644 100644
+index 609ae0d..4de7c5e 100644
 --- a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
 +++ b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
-@@ -440,7 +440,9 @@ public class ProfilesViewModel : MyReactiveObject
+@@ -10,6 +10,14 @@ public class ProfilesViewModel : MyReactiveObject
+     private SpeedtestService? _speedtestService;
+     private string? _pendingSelectIndexId;
+ 
++    /// <summary>
++    /// Guards against re-entrant calls to AutoSwitchToggled/AutoSwitchOrderChanged
++    /// while in-place syncing AutoSwitchEnabled/AutoSwitchOrder values across
++    /// ProfileItems (these properties are reactive, so writing to them would
++    /// otherwise re-trigger the change subscriptions).
++    /// </summary>
++    private bool _autoSwitchSyncInProgress;
++
+     #endregion private prop
+ 
+     #region ObservableCollection
+@@ -376,6 +384,12 @@ public class ProfilesViewModel : MyReactiveObject
+ 
+         ProfileItems.Clear();
+         ProfileItems.AddRange(lstModel);
++
++        foreach (var profileItem in lstModel)
++        {
++            SubscribeAutoSwitchColumnChanges(profileItem);
++        }
++
+         if (lstModel.Count > 0)
+         {
+             ProfileItemModel? selected = null;
+@@ -440,7 +454,9 @@ public class ProfilesViewModel : MyReactiveObject
                          TodayDown = t22 == null ? "" : Utils.HumanFy(t22.TodayDown),
                          TodayUp = t22 == null ? "" : Utils.HumanFy(t22.TodayUp),
                          TotalDown = t22 == null ? "" : Utils.HumanFy(t22.TotalDown),
@@ -815,16 +843,87 @@ index 609ae0d..52b3644 100644
                      }).OrderBy(t => t.Sort).ToList();
  
          return lstModel;
-@@ -448,6 +450,50 @@ public class ProfilesViewModel : MyReactiveObject
+@@ -448,6 +464,121 @@ public class ProfilesViewModel : MyReactiveObject
  
      #endregion Servers && Groups
  
 +    #region Auto Switch column
 +
 +    /// <summary>
++    /// Subscribes to changes of the reactive AutoSwitchEnabled / AutoSwitchOrder
++    /// properties on a profile row, so that user edits in the grid (checkbox
++    /// toggle, or typing a new order value) are persisted to ProfileExManager
++    /// and reflected across the rest of the rotation.
++    /// </summary>
++    private void SubscribeAutoSwitchColumnChanges(ProfileItemModel item)
++    {
++        item.WhenAnyValue(x => x.AutoSwitchEnabled)
++            .Skip(1)
++            .DistinctUntilChanged()
++            .Subscribe(_ =>
++            {
++                if (_autoSwitchSyncInProgress)
++                {
++                    return;
++                }
++                _ = AutoSwitchToggled(item);
++            });
++
++        item.WhenAnyValue(x => x.AutoSwitchOrder)
++            .Skip(1)
++            .DistinctUntilChanged()
++            .Subscribe(_ =>
++            {
++                if (_autoSwitchSyncInProgress)
++                {
++                    return;
++                }
++                _ = AutoSwitchOrderChanged(item);
++            });
++    }
++
++    /// <summary>
++    /// Re-reads AutoSwitchEnabled/AutoSwitchOrder from ProfileExManager for every
++    /// row currently shown in the grid and writes the (possibly re-indexed)
++    /// values back onto the corresponding ProfileItemModel instances, without
++    /// triggering a full RefreshServers(). The sync-in-progress guard prevents
++    /// these writes from re-entering AutoSwitchToggled/AutoSwitchOrderChanged.
++    /// </summary>
++    private void SyncAutoSwitchColumns()
++    {
++        _autoSwitchSyncInProgress = true;
++        try
++        {
++            foreach (var profileItem in ProfileItems)
++            {
++                if (profileItem.IndexId.IsNullOrEmpty())
++                {
++                    continue;
++                }
++
++                var enabled = ProfileExManager.Instance.GetAutoSwitchEnabled(profileItem.IndexId);
++                var order = ProfileExManager.Instance.GetAutoSwitchOrder(profileItem.IndexId);
++
++                if (profileItem.AutoSwitchEnabled != enabled)
++                {
++                    profileItem.AutoSwitchEnabled = enabled;
++                }
++                if (profileItem.AutoSwitchOrder != order)
++                {
++                    profileItem.AutoSwitchOrder = order;
++                }
++            }
++        }
++        finally
++        {
++            _autoSwitchSyncInProgress = false;
++        }
++    }
++
++    /// <summary>
 +    /// Called when the user (un)checks the "Auto Switch" checkbox for a profile
-+    /// row. Persists the change and refreshes the grid so the Order column
-+    /// reflects the (possibly re-indexed) rotation order.
++    /// row. Persists the change and re-syncs the Order column for all rows so
++    /// it reflects the (possibly re-indexed) rotation order.
 +    /// </summary>
 +    public async Task AutoSwitchToggled(ProfileItemModel? item)
 +    {
@@ -836,8 +935,8 @@ index 609ae0d..52b3644 100644
 +        ProfileExManager.Instance.SetAutoSwitchEnabled(item.IndexId, item.AutoSwitchEnabled);
 +        await ProfileExManager.Instance.SaveTo();
 +
++        SyncAutoSwitchColumns();
 +        AppEvents.AutoSwitchListChanged.Publish();
-+        await RefreshServers();
 +    }
 +
 +    /// <summary>
@@ -857,8 +956,8 @@ index 609ae0d..52b3644 100644
 +        ProfileExManager.Instance.SetAutoSwitchOrder(item.IndexId, item.AutoSwitchOrder);
 +        await ProfileExManager.Instance.SaveTo();
 +
++        SyncAutoSwitchColumns();
 +        AppEvents.AutoSwitchListChanged.Publish();
-+        await RefreshServers();
 +    }
 +
 +    #endregion Auto Switch column
@@ -866,7 +965,7 @@ index 609ae0d..52b3644 100644
      #region Add Servers
  
      private async Task<List<ProfileItem>?> GetProfileItems(bool latest)
-@@ -522,6 +568,14 @@ public class ProfilesViewModel : MyReactiveObject
+@@ -522,6 +653,14 @@ public class ProfilesViewModel : MyReactiveObject
          var exists = lstSelected.Exists(t => t.IndexId == _config.IndexId);
  
          await ConfigHandler.RemoveServers(_config, lstSelected);
@@ -1054,99 +1153,53 @@ index 0ce40db..9f23c04 100644
      #endregion UI
  }
 diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml b/v2rayN/v2rayN/Views/ProfilesView.xaml
-index 5a25e4c..3ea6305 100644
+index 5a25e4c..be9dfc1 100644
 --- a/v2rayN/v2rayN/Views/ProfilesView.xaml
 +++ b/v2rayN/v2rayN/Views/ProfilesView.xaml
-@@ -279,6 +279,35 @@
+@@ -279,6 +279,43 @@
                      </Style>
                  </DataGrid.Resources>
                  <DataGrid.Columns>
-+                    <DataGridCheckBoxColumn
++                    <DataGridTemplateColumn
 +                        x:Name="colAutoSwitch"
 +                        Width="40"
-+                        Binding="{Binding AutoSwitchEnabled, UpdateSourceTrigger=PropertyChanged}"
-+                        Header="Auto"
-+                        IsReadOnly="False">
-+                        <DataGridCheckBoxColumn.HeaderStyle>
++                        Header="Auto">
++                        <DataGridTemplateColumn.HeaderStyle>
 +                            <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
 +                                <Setter Property="ToolTip" Value="Include this config in the Auto Switch rotation" />
 +                            </Style>
-+                        </DataGridCheckBoxColumn.HeaderStyle>
-+                    </DataGridCheckBoxColumn>
-+                    <DataGridTextColumn
++                        </DataGridTemplateColumn.HeaderStyle>
++                        <DataGridTemplateColumn.CellTemplate>
++                            <DataTemplate>
++                                <CheckBox
++                                    HorizontalAlignment="Center"
++                                    VerticalAlignment="Center"
++                                    IsChecked="{Binding AutoSwitchEnabled, UpdateSourceTrigger=PropertyChanged}" />
++                            </DataTemplate>
++                        </DataGridTemplateColumn.CellTemplate>
++                    </DataGridTemplateColumn>
++                    <DataGridTemplateColumn
 +                        x:Name="colAutoSwitchOrder"
 +                        Width="50"
-+                        Binding="{Binding AutoSwitchOrder, UpdateSourceTrigger=LostFocus}"
-+                        Header="Order"
-+                        IsReadOnly="False">
-+                        <DataGridTextColumn.HeaderStyle>
++                        Header="Order">
++                        <DataGridTemplateColumn.HeaderStyle>
 +                            <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
 +                                <Setter Property="ToolTip" Value="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation." />
 +                            </Style>
-+                        </DataGridTextColumn.HeaderStyle>
-+                        <DataGridTextColumn.ElementStyle>
-+                            <Style TargetType="{x:Type TextBlock}">
-+                                <Setter Property="HorizontalAlignment" Value="Right" />
-+                            </Style>
-+                        </DataGridTextColumn.ElementStyle>
-+                    </DataGridTextColumn>
++                        </DataGridTemplateColumn.HeaderStyle>
++                        <DataGridTemplateColumn.CellTemplate>
++                            <DataTemplate>
++                                <TextBox
++                                    HorizontalAlignment="Stretch"
++                                    HorizontalContentAlignment="Right"
++                                    BorderThickness="0"
++                                    Text="{Binding AutoSwitchOrder, UpdateSourceTrigger=LostFocus}" />
++                            </DataTemplate>
++                        </DataGridTemplateColumn.CellTemplate>
++                    </DataGridTemplateColumn>
                      <base:MyDGTextColumn
                          Width="80"
                          Binding="{Binding ConfigType}"
-diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
-index 1db64f3..1a48428 100644
---- a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
-+++ b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
-@@ -24,6 +24,7 @@ public partial class ProfilesView
-         lstProfiles.PreviewKeyDown += LstProfiles_PreviewKeyDown;
-         lstProfiles.SelectionChanged += LstProfiles_SelectionChanged;
-         lstProfiles.LoadingRow += LstProfiles_LoadingRow;
-+        lstProfiles.CellEditEnding += LstProfiles_CellEditEnding;
-         menuSelectAll.Click += menuSelectAll_Click;
- 
-         if (_config.UiItem.EnableDragDropSort)
-@@ -221,6 +222,41 @@ public partial class ProfilesView
-         e.Row.Header = $" {e.Row.GetIndex() + 1}";
-     }
- 
-+    private void LstProfiles_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
-+    {
-+        if (e.EditAction != DataGridEditAction.Commit)
-+        {
-+            return;
-+        }
-+        if (e.Row.Item is not ProfileItemModel item)
-+        {
-+            return;
-+        }
-+
-+        var columnName = (e.Column as DataGridBoundColumn)?.Binding is System.Windows.Data.Binding binding
-+            ? binding.Path.Path
-+            : null;
-+
-+        if (columnName is not ("AutoSwitchEnabled" or "AutoSwitchOrder"))
-+        {
-+            return;
-+        }
-+
-+        // Defer until after the binding has written the new value back to the
-+        // ViewModel item, then persist the change.
-+        Dispatcher.BeginInvoke(async () =>
-+        {
-+            if (columnName == "AutoSwitchEnabled")
-+            {
-+                await ViewModel?.AutoSwitchToggled(item);
-+            }
-+            else
-+            {
-+                await ViewModel?.AutoSwitchOrderChanged(item);
-+            }
-+        }, DispatcherPriority.Background);
-+    }
-+
-     private void LstProfiles_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-     {
-         if (_config.UiItem.DoubleClick2Activate)
 diff --git a/v2rayN/v2rayN/Views/StatusBarView.xaml b/v2rayN/v2rayN/Views/StatusBarView.xaml
 index d337c4c..7fd4fc7 100644
 --- a/v2rayN/v2rayN/Views/StatusBarView.xaml

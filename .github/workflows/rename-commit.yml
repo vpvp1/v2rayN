@@ -22,7 +22,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # ایجاد marker داخل پوشه v2rayN
-          echo "v-7.21.2_commit_pach" > v2rayN/.patch-version
+          echo "v-7.21.2_commit_pach_v02" > v2rayN/.patch-version
 
           git add v2rayN/.patch-version
 

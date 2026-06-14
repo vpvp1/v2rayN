@@ -1,4 +1,4 @@
-name: Commit-patch
+name: commit patch
 
 on:
   workflow_dispatch:
@@ -26,6 +26,9 @@ jobs:
 
           echo "Applying patch..."
           git apply v2rayN-outbound-interface-fixed.patch
+
+          echo "Removing patch file..."
+          rm v2rayN-outbound-interface-fixed.patch
 
       - name: Commit changes
         run: |

@@ -16,15 +16,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Update commit message and touch v2ray folder
+      - name: Update commit message and touch v2rayN folder
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # ایجاد marker داخل پوشه v2ray
+          # ایجاد marker داخل پوشه v2rayN
           echo "v-7.21.2_commit_pach" > v2rayN/.patch-version
 
-          git add v2ray/.patch-version
+          git add v2rayN/.patch-version
 
           # تغییر پیام آخرین commit
           git commit --amend -m "v-7.21.2_commit_pach"

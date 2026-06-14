@@ -10,6 +10,14 @@ public class ProfilesViewModel : MyReactiveObject
     private SpeedtestService? _speedtestService;
     private string? _pendingSelectIndexId;
 
+    /// <summary>
+    /// Guards against re-entrant calls to AutoSwitchToggled/AutoSwitchOrderChanged
+    /// while in-place syncing AutoSwitchEnabled/AutoSwitchOrder values across
+    /// ProfileItems (these properties are reactive, so writing to them would
+    /// otherwise re-trigger the change subscriptions).
+    /// </summary>
+    private bool _autoSwitchSyncInProgress;
+
     #endregion private prop
 
     #region ObservableCollection
@@ -376,6 +384,12 @@ public class ProfilesViewModel : MyReactiveObject
 
         ProfileItems.Clear();
         ProfileItems.AddRange(lstModel);
+
+        foreach (var profileItem in lstModel)
+        {
+            SubscribeAutoSwitchColumnChanges(profileItem);
+        }
+
         if (lstModel.Count > 0)
         {
             ProfileItemModel? selected = null;
@@ -440,13 +454,130 @@ public class ProfilesViewModel : MyReactiveObject
                         TodayDown = t22 == null ? "" : Utils.HumanFy(t22.TodayDown),
                         TodayUp = t22 == null ? "" : Utils.HumanFy(t22.TodayUp),
                         TotalDown = t22 == null ? "" : Utils.HumanFy(t22.TotalDown),
-                        TotalUp = t22 == null ? "" : Utils.HumanFy(t22.TotalUp)
+                        TotalUp = t22 == null ? "" : Utils.HumanFy(t22.TotalUp),
+                        AutoSwitchEnabled = t33?.AutoSwitchEnabled ?? false,
+                        AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0
                     }).OrderBy(t => t.Sort).ToList();
 
         return lstModel;
     }
 
     #endregion Servers && Groups
+
+    #region Auto Switch column
+
+    /// <summary>
+    /// Subscribes to changes of the reactive AutoSwitchEnabled / AutoSwitchOrder
+    /// properties on a profile row, so that user edits in the grid (checkbox
+    /// toggle, or typing a new order value) are persisted to ProfileExManager
+    /// and reflected across the rest of the rotation.
+    /// </summary>
+    private void SubscribeAutoSwitchColumnChanges(ProfileItemModel item)
+    {
+        item.WhenAnyValue(x => x.AutoSwitchEnabled)
+            .Skip(1)
+            .DistinctUntilChanged()
+            .Subscribe(enabled =>
+            {
+                if (_autoSwitchSyncInProgress)
+                {
+                    return;
+                }
+                _ = AutoSwitchToggled(item);
+            });
+
+        item.WhenAnyValue(x => x.AutoSwitchOrder)
+            .Skip(1)
+            .DistinctUntilChanged()
+            .Subscribe(order =>
+            {
+                if (_autoSwitchSyncInProgress)
+                {
+                    return;
+                }
+                _ = AutoSwitchOrderChanged(item);
+            });
+    }
+
+    /// <summary>
+    /// Re-reads AutoSwitchEnabled/AutoSwitchOrder from ProfileExManager for every
+    /// row currently shown in the grid and writes the (possibly re-indexed)
+    /// values back onto the corresponding ProfileItemModel instances, without
+    /// triggering a full RefreshServers(). The sync-in-progress guard prevents
+    /// these writes from re-entering AutoSwitchToggled/AutoSwitchOrderChanged.
+    /// </summary>
+    private void SyncAutoSwitchColumns()
+    {
+        _autoSwitchSyncInProgress = true;
+        try
+        {
+            foreach (var profileItem in ProfileItems)
+            {
+                if (profileItem.IndexId.IsNullOrEmpty())
+                {
+                    continue;
+                }
+
+                var enabled = ProfileExManager.Instance.GetAutoSwitchEnabled(profileItem.IndexId);
+                var order = ProfileExManager.Instance.GetAutoSwitchOrder(profileItem.IndexId);
+
+                if (profileItem.AutoSwitchEnabled != enabled)
+                {
+                    profileItem.AutoSwitchEnabled = enabled;
+                }
+                if (profileItem.AutoSwitchOrder != order)
+                {
+                    profileItem.AutoSwitchOrder = order;
+                }
+            }
+        }
+        finally
+        {
+            _autoSwitchSyncInProgress = false;
+        }
+    }
+
+    /// <summary>
+    /// Called when the user (un)checks the "Auto Switch" checkbox for a profile
+    /// row. Persists the change and re-syncs the Order column for all rows so
+    /// it reflects the (possibly re-indexed) rotation order.
+    /// </summary>
+    public async Task AutoSwitchToggled(ProfileItemModel? item)
+    {
+        if (item is null || item.IndexId.IsNullOrEmpty())
+        {
+            return;
+        }
+
+        ProfileExManager.Instance.SetAutoSwitchEnabled(item.IndexId, item.AutoSwitchEnabled);
+        await ProfileExManager.Instance.SaveTo();
+
+        SyncAutoSwitchColumns();
+        AppEvents.AutoSwitchListChanged.Publish();
+    }
+
+    /// <summary>
+    /// Called when the user manually edits the "Order" cell for a profile row.
+    /// A value of 0 (or empty) removes the profile from the rotation. Any other
+    /// positive value enables the profile for the rotation at that position;
+    /// if the value collides with another profile's order, the value just
+    /// entered wins and the remaining profiles are re-indexed (1..N).
+    /// </summary>
+    public async Task AutoSwitchOrderChanged(ProfileItemModel? item)
+    {
+        if (item is null || item.IndexId.IsNullOrEmpty())
+        {
+            return;
+        }
+
+        ProfileExManager.Instance.SetAutoSwitchOrder(item.IndexId, item.AutoSwitchOrder);
+        await ProfileExManager.Instance.SaveTo();
+
+        SyncAutoSwitchColumns();
+        AppEvents.AutoSwitchListChanged.Publish();
+    }
+
+    #endregion Auto Switch column
 
     #region Add Servers
 
@@ -522,6 +653,14 @@ public class ProfilesViewModel : MyReactiveObject
         var exists = lstSelected.Exists(t => t.IndexId == _config.IndexId);
 
         await ConfigHandler.RemoveServers(_config, lstSelected);
+
+        foreach (var sel in lstSelected)
+        {
+            ProfileExManager.Instance.RemoveFromAutoSwitch(sel.IndexId);
+        }
+        await ProfileExManager.Instance.SaveTo();
+        AppEvents.AutoSwitchListChanged.Publish();
+
         NoticeManager.Instance.Enqueue(ResUI.OperationSuccess);
         if (lstSelected.Count == ProfileItems.Count)
         {

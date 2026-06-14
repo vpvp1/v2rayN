@@ -27,4 +27,24 @@ public static class AppEvents
     public static readonly EventChannel<Unit> TestServerRequested = new();
     public static readonly EventChannel<Unit> InboundDisplayRequested = new();
     public static readonly EventChannel<ESysProxyType> SysProxyChangeRequested = new();
+
+    /// <summary>
+    /// Published whenever the user toggles Auto Switch on/off (e.g. from the
+    /// status bar or tray menu), or changes the rotation interval.
+    /// </summary>
+    public static readonly EventChannel<bool> AutoSwitchToggleRequested = new();
+
+    /// <summary>
+    /// Published whenever the set of profiles enabled for Auto Switch, or their
+    /// rotation order, changes (e.g. checkbox/order edited in the Profiles grid).
+    /// Lets AutoSwitchManager refresh its rotation list.
+    /// </summary>
+    public static readonly EventChannel<Unit> AutoSwitchListChanged = new();
+
+    /// <summary>
+    /// Published by AutoSwitchManager whenever the active rotation state changes
+    /// (enabled/disabled, or interval updated), so UI elements (status bar, tray)
+    /// can refresh their display.
+    /// </summary>
+    public static readonly EventChannel<Unit> AutoSwitchStateChanged = new();
 }

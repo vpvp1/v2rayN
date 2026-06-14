@@ -90,6 +90,26 @@ public class StatusBarViewModel : MyReactiveObject
     [Reactive]
     public bool BlIsNonWindows { get; set; }
 
+    [Reactive]
+    public List<ComboItem> OutboundInterfaces { get; set; } = [];
+
+    [Reactive]
+    public ComboItem? SelectedOutboundInterface { get; set; }
+
+    /// <summary>
+    /// Whether automatic config rotation (Auto Switch) is currently enabled.
+    /// Bound to the toggle in the status bar and the tray menu.
+    /// </summary>
+    [Reactive]
+    public bool AutoSwitchEnabled { get; set; }
+
+    /// <summary>
+    /// Rotation interval, in seconds, between automatic config switches.
+    /// Bound to a text box in the status bar and tray menu.
+    /// </summary>
+    [Reactive]
+    public string AutoSwitchIntervalSecondsText { get; set; } = "60";
+
     #endregion UI
 
     public StatusBarViewModel(Func<EViewAction, object?, Task<bool>>? updateView)
@@ -188,6 +208,29 @@ public class StatusBarViewModel : MyReactiveObject
         {
             await SetListenerType(ESysProxyType.Pac);
         });
+
+        // Outbound Interface: watch selection changes
+        this.WhenAnyValue(x => x.SelectedOutboundInterface)
+            .Subscribe(item => OutboundInterfaceSelectedChanged(item));
+
+        InitOutboundInterfaces();
+
+        // Auto Switch: initial state from config
+        AutoSwitchEnabled = _config.AutoSwitchItem?.Enabled == true;
+        AutoSwitchIntervalSecondsText = (_config.AutoSwitchItem?.IntervalSeconds ?? 60).ToString();
+
+        this.WhenAnyValue(x => x.AutoSwitchEnabled)
+            .Skip(1)
+            .Subscribe(enabled => AutoSwitchEnabledChanged(enabled));
+
+        this.WhenAnyValue(x => x.AutoSwitchIntervalSecondsText)
+            .Skip(1)
+            .Subscribe(text => AutoSwitchIntervalChanged(text));
+
+        AppEvents.AutoSwitchStateChanged
+            .AsObservable()
+            .ObserveOn(RxSchedulers.MainThreadScheduler)
+            .Subscribe(_ => RefreshAutoSwitchUi());
 
         #endregion WhenAnyValue && ReactiveCommand
 
@@ -566,6 +609,111 @@ public class StatusBarViewModel : MyReactiveObject
         }
         await Task.CompletedTask;
     }
+
+    #region Outbound Interface
+
+    private void InitOutboundInterfaces()
+    {
+        var interfaces = new List<ComboItem>
+        {
+            new() { ID = string.Empty, Text = "Auto (Default)" }
+        };
+
+        try
+        {
+            foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up)
+                    continue;
+                if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
+                    continue;
+                if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel)
+                    continue;
+
+                foreach (var addr in nic.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                        continue;
+
+                    var ip = addr.Address.ToString();
+                    interfaces.Add(new ComboItem
+                    {
+                        ID   = ip,
+                        Text = $"{nic.Name} \u2014 {ip}"
+                    });
+                }
+            }
+        }
+        catch { }
+
+        OutboundInterfaces = interfaces;
+
+        // Restore saved selection
+        var saved = _config.CoreBasicItem.OutboundInterface ?? string.Empty;
+        SelectedOutboundInterface = interfaces.FirstOrDefault(i => i.ID == saved) ?? interfaces[0];
+    }
+
+    private void OutboundInterfaceSelectedChanged(ComboItem? item)
+    {
+        if (item == null) return;
+
+        var newVal = item.ID ?? string.Empty;
+        if (_config.CoreBasicItem.OutboundInterface == newVal)
+            return;
+
+        _config.CoreBasicItem.OutboundInterface = newVal;
+        _ = ConfigHandler.SaveConfig(_config);
+        AppEvents.ReloadRequested.Publish();
+    }
+
+    #endregion Outbound Interface
+
+    #region Auto Switch
+
+    /// <summary>
+    /// Called when the user toggles Auto Switch on/off from the status bar
+    /// toggle button or the tray menu checkbox.
+    /// </summary>
+    private void AutoSwitchEnabledChanged(bool enabled)
+    {
+        AppEvents.AutoSwitchToggleRequested.Publish(enabled);
+    }
+
+    /// <summary>
+    /// Called when the user edits the rotation interval text box (value in
+    /// seconds). Non-numeric or non-positive input is ignored.
+    /// </summary>
+    private void AutoSwitchIntervalChanged(string text)
+    {
+        if (!int.TryParse(text?.Trim(), out var seconds) || seconds <= 0)
+        {
+            return;
+        }
+
+        _ = AutoSwitchManager.Instance.SetIntervalSeconds(seconds);
+    }
+
+    /// <summary>
+    /// Refreshes the status bar / tray toggle and interval display from the
+    /// current AutoSwitchManager state, e.g. after the manager auto-disables
+    /// itself because the rotation list became empty.
+    /// </summary>
+    private void RefreshAutoSwitchUi()
+    {
+        var enabled = AutoSwitchManager.Instance.IsEnabled;
+        if (AutoSwitchEnabled != enabled)
+        {
+            AutoSwitchEnabled = enabled;
+        }
+
+        var interval = AutoSwitchManager.Instance.IntervalSeconds.ToString();
+        if (AutoSwitchIntervalSecondsText != interval)
+        {
+            AutoSwitchIntervalSecondsText = interval;
+        }
+    }
+
+    #endregion Auto Switch
 
     #endregion UI
 }

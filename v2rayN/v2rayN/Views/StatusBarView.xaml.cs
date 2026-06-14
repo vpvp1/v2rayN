@@ -63,6 +63,22 @@ public partial class StatusBarView
             this.OneWayBind(ViewModel, vm => vm.RoutingItems, v => v.cmbRoutings2.ItemsSource).DisposeWith(disposables);
             this.Bind(ViewModel, vm => vm.SelectedRouting, v => v.cmbRoutings2.SelectedItem).DisposeWith(disposables);
             this.OneWayBind(ViewModel, vm => vm.BlRouting, v => v.cmbRoutings2.Visibility).DisposeWith(disposables);
+
+            // Outbound Interface — status bar
+            this.OneWayBind(ViewModel, vm => vm.OutboundInterfaces, v => v.cmbOutboundInterface.ItemsSource).DisposeWith(disposables);
+            this.Bind(ViewModel, vm => vm.SelectedOutboundInterface, v => v.cmbOutboundInterface.SelectedItem).DisposeWith(disposables);
+
+            // Outbound Interface — tray menu
+            this.OneWayBind(ViewModel, vm => vm.OutboundInterfaces, v => v.cmbOutboundInterfaceTray.ItemsSource).DisposeWith(disposables);
+            this.Bind(ViewModel, vm => vm.SelectedOutboundInterface, v => v.cmbOutboundInterfaceTray.SelectedItem).DisposeWith(disposables);
+
+            // Auto Switch — status bar
+            this.Bind(ViewModel, vm => vm.AutoSwitchEnabled, v => v.togAutoSwitch.IsChecked).DisposeWith(disposables);
+            this.Bind(ViewModel, vm => vm.AutoSwitchIntervalSecondsText, v => v.txtAutoSwitchInterval.Text).DisposeWith(disposables);
+
+            // Auto Switch — tray menu
+            this.Bind(ViewModel, vm => vm.AutoSwitchEnabled, v => v.togAutoSwitchTray.IsChecked).DisposeWith(disposables);
+            this.Bind(ViewModel, vm => vm.AutoSwitchIntervalSecondsText, v => v.txtAutoSwitchIntervalTray.Text).DisposeWith(disposables);
         });
     }
 

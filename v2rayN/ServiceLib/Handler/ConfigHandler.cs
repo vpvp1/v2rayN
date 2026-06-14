@@ -169,6 +169,7 @@ public static class ConfigHandler
             Interval = "10-20"
         };
         config.GlobalHotkeys ??= new();
+        config.AutoSwitchItem ??= new();
 
         if (config.SystemProxyItem.SystemProxyExceptions.IsNullOrEmpty())
         {

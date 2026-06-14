@@ -63,6 +63,32 @@
                         HorizontalAlignment="Left"
                         VerticalAlignment="Center"
                         AutomationProperties.Name="{x:Static resx:ResUI.TbEnableTunAs}" />
+
+                    <TextBlock
+                        Margin="{StaticResource MarginLeftRight8}"
+                        VerticalAlignment="Center"
+                        Style="{StaticResource StatusbarItem}"
+                        Text="Auto Switch" />
+                    <ToggleButton
+                        x:Name="togAutoSwitch"
+                        Margin="{StaticResource Margin4}"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="Auto Switch"
+                        ToolTip="Automatically rotate between the configs selected in the Servers list, in order, at the interval (in seconds) specified." />
+                    <TextBox
+                        x:Name="txtAutoSwitchInterval"
+                        Width="50"
+                        Margin="{StaticResource MarginLeftRight4}"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="Auto Switch Interval (seconds)"
+                        Style="{StaticResource DefTextBox}"
+                        ToolTip="Auto Switch interval, in seconds" />
+                    <TextBlock
+                        Margin="{StaticResource MarginLeftRight4}"
+                        VerticalAlignment="Center"
+                        Style="{StaticResource StatusbarItem}"
+                        Text="sec" />
                 </StackPanel>
 
                 <StackPanel
@@ -93,6 +119,17 @@
                         DisplayMemberPath="Remarks"
                         FontSize="{DynamicResource StdFontSize}"
                         Style="{StaticResource MaterialDesignFloatingHintComboBox}" />
+
+                    <ComboBox
+                        x:Name="cmbOutboundInterface"
+                        Width="180"
+                        Margin="{StaticResource MarginLeftRight8}"
+                        materialDesign:HintAssist.Hint="Outbound Interface"
+                        AutomationProperties.Name="Outbound Interface"
+                        DisplayMemberPath="Text"
+                        FontSize="{DynamicResource StdFontSize}"
+                        Style="{StaticResource MaterialDesignFloatingHintComboBox}"
+                        ToolTip="Select network interface for all outbound traffic and DNS. Auto = Windows default." />
                 </StackPanel>
 
                 <StackPanel Margin="{StaticResource MarginLeftRight8}" VerticalAlignment="Center">
@@ -200,6 +237,50 @@
                                     FontSize="{DynamicResource StdFontSize}"
                                     Style="{StaticResource MaterialDesignFilledComboBox}" />
                             </DockPanel>
+                        </MenuItem.Header>
+                    </MenuItem>
+                    <Separator />
+                    <MenuItem
+                        Height="Auto"
+                        AutomationProperties.Name="Outbound Interface">
+                        <MenuItem.Header>
+                            <DockPanel>
+                                <ComboBox
+                                    x:Name="cmbOutboundInterfaceTray"
+                                    MaxWidth="300"
+                                    materialDesign:HintAssist.Hint="Outbound Interface"
+                                    AutomationProperties.Name="Outbound Interface"
+                                    DisplayMemberPath="Text"
+                                    FontSize="{DynamicResource StdFontSize}"
+                                    Style="{StaticResource MaterialDesignFilledComboBox}" />
+                            </DockPanel>
+                        </MenuItem.Header>
+                    </MenuItem>
+                    <Separator />
+                    <MenuItem
+                        Height="Auto"
+                        AutomationProperties.Name="Auto Switch"
+                        ToolTip="Automatically rotate between the configs selected in the Servers list, in order, at the interval (in seconds) specified.">
+                        <MenuItem.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <ToggleButton
+                                    x:Name="togAutoSwitchTray"
+                                    Margin="{StaticResource MarginRight8}"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="Auto Switch" />
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    Text="Auto Switch" />
+                                <TextBox
+                                    x:Name="txtAutoSwitchIntervalTray"
+                                    Width="50"
+                                    Margin="{StaticResource MarginLeftRight8}"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="Auto Switch Interval (seconds)"
+                                    Style="{StaticResource DefTextBox}"
+                                    ToolTip="Auto Switch interval, in seconds" />
+                                <TextBlock VerticalAlignment="Center" Text="sec" />
+                            </StackPanel>
                         </MenuItem.Header>
                     </MenuItem>
                     <Separator />

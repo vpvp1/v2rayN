@@ -68,8 +68,15 @@ public static class CoreConfigHandler
                 ret.Msg = ResUI.FailedGenDefaultConfiguration;
                 return ret;
             }
-            File.Copy(addressFileName, fileName);
-            File.SetAttributes(fileName, FileAttributes.Normal); //Copy will keep the attributes of addressFileName, so we need to add write permissions to fileName just in case of addressFileName is a read-only file.
+            // Outbound Interface patch: inject sendThrough into custom config
+            var customContent = await File.ReadAllTextAsync(addressFileName);
+            var outboundInterface = AppManager.Instance.Config.CoreBasicItem.OutboundInterface?.Trim();
+            if (!string.IsNullOrEmpty(outboundInterface))
+            {
+                customContent = InjectSendThroughIntoJson(customContent, outboundInterface);
+            }
+            await File.WriteAllTextAsync(fileName, customContent);
+            File.SetAttributes(fileName, FileAttributes.Normal);
 
             //check again
             if (!File.Exists(fileName))
@@ -87,6 +94,67 @@ public static class CoreConfigHandler
             Logging.SaveLog(_tag, ex);
             ret.Msg = ResUI.FailedGenDefaultConfiguration;
             return ret;
+        }
+    }
+
+    private static string InjectSendThroughIntoJson(string json, string interfaceIP)
+    {
+        try
+        {
+            var root = System.Text.Json.Nodes.JsonNode.Parse(json)?.AsObject();
+            if (root == null) return json;
+
+            // Patch outbounds
+            if (root["outbounds"] is System.Text.Json.Nodes.JsonArray outbounds)
+            {
+                foreach (var item in outbounds)
+                {
+                    var ob = item?.AsObject();
+                    if (ob == null) continue;
+                    var proto = ob["protocol"]?.GetValue<string>() ?? string.Empty;
+                    if (proto is "freedom" or "blackhole" or "dns" or "loopback")
+                        continue;
+                    ob.Remove("sendThrough");
+                    ob.Add("sendThrough", System.Text.Json.Nodes.JsonValue.Create(interfaceIP));
+                }
+            }
+
+            // Patch DNS servers
+            if (root["dns"]?.AsObject() is System.Text.Json.Nodes.JsonObject dnsObj &&
+                dnsObj["servers"] is System.Text.Json.Nodes.JsonArray dnsServers)
+            {
+                var patched = new System.Text.Json.Nodes.JsonArray();
+                foreach (var entry in dnsServers)
+                {
+                    if (entry is System.Text.Json.Nodes.JsonValue strVal &&
+                        strVal.TryGetValue<string>(out var addr))
+                    {
+                        patched.Add(new System.Text.Json.Nodes.JsonObject
+                        {
+                            ["address"]     = addr,
+                            ["sendThrough"] = interfaceIP
+                        });
+                    }
+                    else if (entry?.AsObject() is System.Text.Json.Nodes.JsonObject obj)
+                    {
+                        obj.Remove("sendThrough");
+                        obj.Add("sendThrough", System.Text.Json.Nodes.JsonValue.Create(interfaceIP));
+                        patched.Add(System.Text.Json.Nodes.JsonNode.Parse(obj.ToJsonString()));
+                    }
+                    else
+                    {
+                        patched.Add(entry?.DeepClone());
+                    }
+                }
+                dnsObj.Remove("servers");
+                dnsObj.Add("servers", patched);
+            }
+
+            return root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        }
+        catch
+        {
+            return json;
         }
     }
 

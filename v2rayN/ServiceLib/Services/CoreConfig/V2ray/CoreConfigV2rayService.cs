@@ -62,6 +62,7 @@ public partial class CoreConfigV2rayService(CoreConfigContext context)
             }
             ApplyOutboundBindInterface();
             ApplyOutboundSendThrough();
+            ApplyOutboundSendThroughInterface();
 
             var finalRule = BuildFinalRule();
             if (!string.IsNullOrEmpty(finalRule?.balancerTag))
@@ -206,6 +207,7 @@ public partial class CoreConfigV2rayService(CoreConfigContext context)
             }
             ApplyOutboundBindInterface();
             ApplyOutboundSendThrough();
+            ApplyOutboundSendThroughInterface();
             //ret.Msg =string.Format(ResUI.SuccessfulConfiguration"), node.getSummary());
             ret.Success = true;
             ret.Data = JsonUtils.Serialize(_coreConfig);
@@ -278,6 +280,7 @@ public partial class CoreConfigV2rayService(CoreConfigContext context)
             }
             ApplyOutboundBindInterface();
             ApplyOutboundSendThrough();
+            ApplyOutboundSendThroughInterface();
 
             ret.Msg = string.Format(ResUI.SuccessfulConfiguration, "");
             ret.Success = true;

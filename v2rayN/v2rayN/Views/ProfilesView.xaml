@@ -279,6 +279,43 @@
                     </Style>
                 </DataGrid.Resources>
                 <DataGrid.Columns>
+                    <DataGridTemplateColumn
+                        x:Name="colAutoSwitch"
+                        Width="40"
+                        Header="Auto">
+                        <DataGridTemplateColumn.HeaderStyle>
+                            <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                <Setter Property="ToolTip" Value="Include this config in the Auto Switch rotation" />
+                            </Style>
+                        </DataGridTemplateColumn.HeaderStyle>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    IsChecked="{Binding AutoSwitchEnabled, UpdateSourceTrigger=PropertyChanged}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn
+                        x:Name="colAutoSwitchOrder"
+                        Width="50"
+                        Header="Order">
+                        <DataGridTemplateColumn.HeaderStyle>
+                            <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                <Setter Property="ToolTip" Value="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation." />
+                            </Style>
+                        </DataGridTemplateColumn.HeaderStyle>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBox
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Right"
+                                    BorderThickness="0"
+                                    Text="{Binding AutoSwitchOrder, UpdateSourceTrigger=LostFocus}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                     <base:MyDGTextColumn
                         Width="80"
                         Binding="{Binding ConfigType}"

@@ -237,6 +237,7 @@ public class DnsServer4Ray
     public bool? skipFallback { get; set; }
     public List<string>? expectedIPs { get; set; }
     public string? tag { get; set; }
+    public string? sendThrough { get; set; }
 }
 
 public class Routing4Ray

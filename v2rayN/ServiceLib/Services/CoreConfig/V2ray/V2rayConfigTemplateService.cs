@@ -185,6 +185,48 @@ public partial class CoreConfigV2rayService
         }
     }
 
+    private void ApplyOutboundSendThroughInterface()
+    {
+        var outboundInterface = _config.CoreBasicItem.OutboundInterface?.TrimEx();
+        if (outboundInterface.IsNullOrEmpty())
+        {
+            return;
+        }
+
+        // Set sendThrough on all applicable outbounds
+        foreach (var outbound in _coreConfig.outbounds ?? [])
+        {
+            outbound.sendThrough = ShouldBindNet(outbound) ? outboundInterface : null;
+        }
+
+        // Set sendThrough on all DNS servers
+        if (_coreConfig.dns is Dns4Ray dns4Ray && dns4Ray.servers != null)
+        {
+            var patchedServers = new List<object>();
+            foreach (var serverEntry in dns4Ray.servers)
+            {
+                if (serverEntry is string strServer)
+                {
+                    patchedServers.Add(new DnsServer4Ray
+                    {
+                        address = strServer,
+                        sendThrough = outboundInterface
+                    });
+                }
+                else if (serverEntry is DnsServer4Ray dnsServer)
+                {
+                    dnsServer.sendThrough = outboundInterface;
+                    patchedServers.Add(dnsServer);
+                }
+                else if (serverEntry != null)
+                {
+                    patchedServers.Add(serverEntry);
+                }
+            }
+            dns4Ray.servers = patchedServers;
+        }
+    }
+
     private static bool ShouldBindNet(Outbounds4Ray outbound)
     {
         if (outbound.protocol is "freedom" or "blackhole" or "dns" or "loopback")

@@ -38,6 +38,18 @@ public class ProfileItemModel : ReactiveObject
     [Reactive]
     public string TotalDown { get; set; }
 
+    /// <summary>
+    /// Whether this profile is included in the Auto Switch rotation (checkbox column).
+    /// </summary>
+    [Reactive]
+    public bool AutoSwitchEnabled { get; set; }
+
+    /// <summary>
+    /// Position of this profile within the Auto Switch rotation order (editable column).
+    /// </summary>
+    [Reactive]
+    public int AutoSwitchOrder { get; set; }
+
     public string GetSummary()
     {
         var summary = $"[{ConfigType}] {Remarks}";

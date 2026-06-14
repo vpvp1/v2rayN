@@ -19,6 +19,8 @@ public class CoreBasicItem
 
     public string? BindInterface { get; set; }
 
+    public string? OutboundInterface { get; set; }
+
     public bool EnableFragment { get; set; }
 
     public bool EnableCacheFile4Sbox { get; set; } = true;
@@ -83,6 +85,20 @@ public class MsgUIItem
 {
     public string? MainMsgFilter { get; set; }
     public bool? AutoRefresh { get; set; }
+}
+
+[Serializable]
+public class AutoSwitchItem
+{
+    /// <summary>
+    /// Whether automatic config rotation (Auto Switch) is currently enabled.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Rotation interval, in seconds, between automatic config switches.
+    /// </summary>
+    public int IntervalSeconds { get; set; } = 60;
 }
 
 [Serializable]

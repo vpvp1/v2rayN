@@ -1,0 +1,34 @@
+name: Commit-patch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "Checking patch..."
+          git apply --check v2rayN-outbound-interface-fixed.patch
+
+          echo "Applying patch..."
+          git apply v2rayN-outbound-interface-fixed.patch
+
+      - name: Commit changes
+        run: |
+          git add .
+          git commit -m "Apply outbound interface fix permanently"
+          git push

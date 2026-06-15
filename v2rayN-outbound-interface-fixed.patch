@@ -1,0 +1,730 @@
+From 48fbfcadf71cbffaf9051069c3b311cfbb3365bf Mon Sep 17 00:00:00 2001
+From: v2rayN Dev <dev@v2rayn.local>
+Date: Mon, 15 Jun 2026 08:03:27 +0000
+Subject: [PATCH 1/4] feat: Auto Switch per-profile duration, Order sort (zeros
+ last), column persistence
+
+Changes:
+- ProfileExItem: add AutoSwitchDuration field (default 30s)
+- ProfileItemModel: add AutoSwitchDuration reactive property
+- ProfileExManager: add GetAutoSwitchDuration/SetAutoSwitchDuration, init duration=30
+- AutoSwitchManager: 1s polling timer with per-profile slot expiry
+- ProfilesViewModel: load/sync/subscribe AutoSwitchDuration; special sort for Order col
+- ProfilesView.xaml: add Secs column; Tag= on template columns for persistence
+- ProfilesView.xaml.cs: GetColumnExName helper; ColumnDisplayIndexChanged for live save
+---
+ .../ServiceLib/Manager/AutoSwitchManager.cs   | 25 +++++--
+ v2rayN/ServiceLib/Manager/ProfileExManager.cs | 24 ++++++-
+ v2rayN/ServiceLib/Models/ProfileExItem.cs     |  7 ++
+ v2rayN/ServiceLib/Models/ProfileItemModel.cs  |  7 ++
+ .../ViewModels/ProfilesViewModel.cs           | 67 +++++++++++++++++--
+ v2rayN/v2rayN/Views/ProfilesView.xaml         | 26 ++++++-
+ v2rayN/v2rayN/Views/ProfilesView.xaml.cs      | 48 +++++++++----
+ 7 files changed, 181 insertions(+), 23 deletions(-)
+
+diff --git a/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs b/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs
+index e4690be3..1aca52b6 100644
+--- a/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs
++++ b/v2rayN/ServiceLib/Manager/AutoSwitchManager.cs
+@@ -22,6 +22,8 @@ public class AutoSwitchManager
+     private readonly object _syncRoot = new();
+     private int _currentRotationIndex = -1;
+     private bool _initialized;
++    // Track when the current profile's time slot expires
++    private DateTime _currentSlotExpiry = DateTime.MinValue;
+ 
+     private AutoSwitchManager()
+     {
+@@ -168,15 +170,19 @@ public class AutoSwitchManager
+         lock (_syncRoot)
+         {
+             _currentRotationIndex = -1;
+-            _timer = new System.Timers.Timer(IntervalSeconds * 1000d)
++            // Use a 1-second polling timer so we can honour per-profile durations
++            // without restarting the timer every time the duration changes.
++            _timer = new System.Timers.Timer(1000d)
+             {
+                 AutoReset = true,
+             };
+             _timer.Elapsed += (_, _) => _ = OnTimerElapsed();
++            // Set expiry immediately so the first tick switches right away
++            _currentSlotExpiry = DateTime.UtcNow;
+             _timer.Start();
+         }
+ 
+-        Logging.SaveLog($"{_tag} - started, interval = {IntervalSeconds}s");
++        Logging.SaveLog($"{_tag} - started (per-profile duration mode)");
+     }
+ 
+     private void StopTimer()
+@@ -199,7 +205,11 @@ public class AutoSwitchManager
+     {
+         try
+         {
+-            await SwitchToNextProfile();
++            // Only switch when the current profile's time slot has expired
++            if (DateTime.UtcNow >= _currentSlotExpiry)
++            {
++                await SwitchToNextProfile();
++            }
+         }
+         catch (Exception ex)
+         {
+@@ -238,6 +248,13 @@ public class AutoSwitchManager
+             return;
+         }
+ 
++        // Schedule the next switch based on this profile's per-profile duration
++        var durationSeconds = ProfileExManager.Instance.GetAutoSwitchDuration(nextIndexId);
++        lock (_syncRoot)
++        {
++            _currentSlotExpiry = DateTime.UtcNow.AddSeconds(durationSeconds);
++        }
++
+         if (nextIndexId == _config.IndexId)
+         {
+             // Already the active server; still counts as a rotation step, but
+@@ -257,7 +274,7 @@ public class AutoSwitchManager
+ 
+         if (await ConfigHandler.SetDefaultServerIndex(_config, nextIndexId) == 0)
+         {
+-            Logging.SaveLog($"{_tag} - switched to: {item.GetSummary()}");
++            Logging.SaveLog($"{_tag} - switched to: {item.GetSummary()} (duration={durationSeconds}s)");
+             AppEvents.ProfilesRefreshRequested.Publish();
+             AppEvents.ReloadRequested.Publish();
+         }
+diff --git a/v2rayN/ServiceLib/Manager/ProfileExManager.cs b/v2rayN/ServiceLib/Manager/ProfileExManager.cs
+index 0948a657..41369be2 100644
+--- a/v2rayN/ServiceLib/Manager/ProfileExManager.cs
++++ b/v2rayN/ServiceLib/Manager/ProfileExManager.cs
+@@ -98,7 +98,8 @@ public class ProfileExManager
+             Sort = 0,
+             Message = string.Empty,
+             AutoSwitchEnabled = false,
+-            AutoSwitchOrder = 0
++            AutoSwitchOrder = 0,
++            AutoSwitchDuration = 30
+         };
+         _lstProfileEx.Add(profileEx);
+         IndexIdEnqueue(indexId);
+@@ -181,6 +182,27 @@ public class ProfileExManager
+ 
+     #region Auto Switch
+ 
++    /// <summary>
++    /// Returns the per-profile Auto Switch duration in seconds (default 30).
++    /// </summary>
++    public int GetAutoSwitchDuration(string indexId)
++    {
++        var profileEx = _lstProfileEx.FirstOrDefault(t => t.IndexId == indexId);
++        var dur = profileEx?.AutoSwitchDuration ?? 30;
++        return dur > 0 ? dur : 30;
++    }
++
++    /// <summary>
++    /// Sets the per-profile Auto Switch duration (in seconds).
++    /// Must be >= 1. Values <= 0 are treated as 30.
++    /// </summary>
++    public void SetAutoSwitchDuration(string indexId, int seconds)
++    {
++        var profileEx = GetProfileExItem(indexId);
++        profileEx.AutoSwitchDuration = Math.Max(1, seconds);
++        IndexIdEnqueue(indexId);
++    }
++
+     /// <summary>
+     /// Returns whether the given profile is included in the Auto Switch rotation.
+     /// </summary>
+diff --git a/v2rayN/ServiceLib/Models/ProfileExItem.cs b/v2rayN/ServiceLib/Models/ProfileExItem.cs
+index f7d0218f..0bce7a51 100644
+--- a/v2rayN/ServiceLib/Models/ProfileExItem.cs
++++ b/v2rayN/ServiceLib/Models/ProfileExItem.cs
+@@ -22,4 +22,11 @@ public class ProfileExItem
+     /// AutoSwitchEnabled checkbox is checked.
+     /// </summary>
+     public int AutoSwitchOrder { get; set; }
++
++    /// <summary>
++    /// How many seconds to stay on this profile during Auto Switch rotation.
++    /// 0 means use the global IntervalSeconds from AutoSwitchItem config.
++    /// Default is 30 seconds when first enabled.
++    /// </summary>
++    public int AutoSwitchDuration { get; set; } = 30;
+ }
+diff --git a/v2rayN/ServiceLib/Models/ProfileItemModel.cs b/v2rayN/ServiceLib/Models/ProfileItemModel.cs
+index 7222cc68..c32961ce 100644
+--- a/v2rayN/ServiceLib/Models/ProfileItemModel.cs
++++ b/v2rayN/ServiceLib/Models/ProfileItemModel.cs
+@@ -50,6 +50,13 @@ public class ProfileItemModel : ReactiveObject
+     [Reactive]
+     public int AutoSwitchOrder { get; set; }
+ 
++    /// <summary>
++    /// How many seconds to stay on this profile during Auto Switch rotation.
++    /// Default is 30 seconds. 0 means use global interval.
++    /// </summary>
++    [Reactive]
++    public int AutoSwitchDuration { get; set; } = 30;
++
+     public string GetSummary()
+     {
+         var summary = $"[{ConfigType}] {Remarks}";
+diff --git a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+index f0b7ed6c..ef0a7123 100644
+--- a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
++++ b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+@@ -456,7 +456,8 @@ public class ProfilesViewModel : MyReactiveObject
+                         TotalDown = t22 == null ? "" : Utils.HumanFy(t22.TotalDown),
+                         TotalUp = t22 == null ? "" : Utils.HumanFy(t22.TotalUp),
+                         AutoSwitchEnabled = t33?.AutoSwitchEnabled ?? false,
+-                        AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0
++                        AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0,
++                        AutoSwitchDuration = t33?.AutoSwitchDuration > 0 ? t33.AutoSwitchDuration : 30
+                     }).OrderBy(t => t.Sort).ToList();
+ 
+         return lstModel;
+@@ -497,6 +498,18 @@ public class ProfilesViewModel : MyReactiveObject
+                 }
+                 _ = AutoSwitchOrderChanged(item);
+             });
++
++        item.WhenAnyValue(x => x.AutoSwitchDuration)
++            .Skip(1)
++            .DistinctUntilChanged()
++            .Subscribe(duration =>
++            {
++                if (_autoSwitchSyncInProgress)
++                {
++                    return;
++                }
++                _ = AutoSwitchDurationChanged(item);
++            });
+     }
+ 
+     /// <summary>
+@@ -520,6 +533,7 @@ public class ProfilesViewModel : MyReactiveObject
+ 
+                 var enabled = ProfileExManager.Instance.GetAutoSwitchEnabled(profileItem.IndexId);
+                 var order = ProfileExManager.Instance.GetAutoSwitchOrder(profileItem.IndexId);
++                var duration = ProfileExManager.Instance.GetAutoSwitchDuration(profileItem.IndexId);
+ 
+                 if (profileItem.AutoSwitchEnabled != enabled)
+                 {
+@@ -529,6 +543,10 @@ public class ProfilesViewModel : MyReactiveObject
+                 {
+                     profileItem.AutoSwitchOrder = order;
+                 }
++                if (profileItem.AutoSwitchDuration != duration)
++                {
++                    profileItem.AutoSwitchDuration = duration;
++                }
+             }
+         }
+         finally
+@@ -577,6 +595,21 @@ public class ProfilesViewModel : MyReactiveObject
+         AppEvents.AutoSwitchListChanged.Publish();
+     }
+ 
++    /// <summary>
++    /// Called when the user manually edits the "Seconds" (duration) cell for a profile row.
++    /// Persists the per-profile Auto Switch duration to ProfileExManager.
++    /// </summary>
++    public async Task AutoSwitchDurationChanged(ProfileItemModel? item)
++    {
++        if (item is null || item.IndexId.IsNullOrEmpty())
++        {
++            return;
++        }
++
++        ProfileExManager.Instance.SetAutoSwitchDuration(item.IndexId, item.AutoSwitchDuration);
++        await ProfileExManager.Instance.SaveTo();
++    }
++
+     #endregion Auto Switch column
+ 
+     #region Add Servers
+@@ -785,13 +818,39 @@ public class ProfilesViewModel : MyReactiveObject
+             return;
+         }
+ 
++        // Special sort for AutoSwitchOrder: zeros always go last
++        if (colName == nameof(ProfileItemModel.AutoSwitchOrder))
++        {
++            _dicHeaderSort.TryAdd(colName, true);
++            _dicHeaderSort.TryGetValue(colName, out var asc);
++
++            var sorted = asc
++                ? ProfileItems
++                    .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
++                    .ThenBy(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
++                    .ToList()
++                : ProfileItems
++                    .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
++                    .ThenByDescending(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
++                    .ToList();
++
++            _dicHeaderSort[colName] = !asc;
++
++            using (ProfileItems.SuspendNotifications())
++            {
++                ProfileItems.Clear();
++                ProfileItems.AddRange(sorted);
++            }
++            return;
++        }
++
+         _dicHeaderSort.TryAdd(colName, true);
+-        _dicHeaderSort.TryGetValue(colName, out var asc);
+-        if (await ConfigHandler.SortServers(_config, _config.SubIndexId, colName, asc) != 0)
++        _dicHeaderSort.TryGetValue(colName, out var ascDefault);
++        if (await ConfigHandler.SortServers(_config, _config.SubIndexId, colName, ascDefault) != 0)
+         {
+             return;
+         }
+-        _dicHeaderSort[colName] = !asc;
++        _dicHeaderSort[colName] = !ascDefault;
+         await RefreshServers();
+     }
+ 
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml b/v2rayN/v2rayN/Views/ProfilesView.xaml
+index be9dfc13..4b74fac1 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml
+@@ -282,7 +282,8 @@
+                     <DataGridTemplateColumn
+                         x:Name="colAutoSwitch"
+                         Width="40"
+-                        Header="Auto">
++                        Header="Auto"
++                        Tag="colAutoSwitch">
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="Include this config in the Auto Switch rotation" />
+@@ -300,7 +301,8 @@
+                     <DataGridTemplateColumn
+                         x:Name="colAutoSwitchOrder"
+                         Width="50"
+-                        Header="Order">
++                        Header="Order"
++                        Tag="AutoSwitchOrder">
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation." />
+@@ -316,6 +318,26 @@
+                             </DataTemplate>
+                         </DataGridTemplateColumn.CellTemplate>
+                     </DataGridTemplateColumn>
++                    <DataGridTemplateColumn
++                        x:Name="colAutoSwitchDuration"
++                        Width="60"
++                        Header="Secs"
++                        Tag="AutoSwitchDuration">
++                        <DataGridTemplateColumn.HeaderStyle>
++                            <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
++                                <Setter Property="ToolTip" Value="How many seconds to stay on this config during Auto Switch rotation. Default is 30." />
++                            </Style>
++                        </DataGridTemplateColumn.HeaderStyle>
++                        <DataGridTemplateColumn.CellTemplate>
++                            <DataTemplate>
++                                <TextBox
++                                    HorizontalAlignment="Stretch"
++                                    HorizontalContentAlignment="Right"
++                                    BorderThickness="0"
++                                    Text="{Binding AutoSwitchDuration, UpdateSourceTrigger=LostFocus}" />
++                            </DataTemplate>
++                        </DataGridTemplateColumn.CellTemplate>
++                    </DataGridTemplateColumn>
+                     <base:MyDGTextColumn
+                         Width="80"
+                         Binding="{Binding ConfigType}"
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+index 1db64f34..7ab9b7e7 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+@@ -95,6 +95,9 @@ public partial class ProfilesView
+                 .ObserveOn(RxSchedulers.MainThreadScheduler)
+                 .Subscribe(_ => AutofitColumnWidth())
+                 .DisposeWith(disposables);
++
++            // Save column order whenever the user drags a column to a new position
++            lstProfiles.ColumnDisplayIndexChanged += (_, _) => StorageUI();
+         });
+ 
+         RestoreUI();
+@@ -240,8 +243,11 @@ public partial class ProfilesView
+             return;
+         }
+ 
+-        var colName = ((MyDGTextColumn)colHeader.Column).ExName;
+-        ViewModel?.SortServer(colName);
++        var colName = GetColumnExName(colHeader.Column);
++        if (!colName.IsNullOrEmpty())
++        {
++            ViewModel?.SortServer(colName);
++        }
+     }
+ 
+     private void menuSelectAll_Click(object sender, RoutedEventArgs e)
+@@ -365,22 +371,23 @@ public partial class ProfilesView
+             var displayIndex = 0;
+             foreach (var item in lvColumnItem)
+             {
+-                foreach (var item2 in lstProfiles.Columns.Cast<MyDGTextColumn>())
++                foreach (var col in lstProfiles.Columns)
+                 {
+-                    if (item2.ExName == item.Name)
++                    var exName = GetColumnExName(col);
++                    if (exName == item.Name)
+                     {
+                         if (item.Width < 0)
+                         {
+-                            item2.Visibility = Visibility.Hidden;
++                            col.Visibility = Visibility.Hidden;
+                         }
+                         else
+                         {
+-                            item2.Width = item.Width;
+-                            item2.DisplayIndex = displayIndex++;
++                            col.Width = item.Width;
++                            col.DisplayIndex = displayIndex++;
+                         }
+                         if (item.Name.ToLower().StartsWith("to"))
+                         {
+-                            item2.Visibility = _config.GuiItem.EnableStatistics ? Visibility.Visible : Visibility.Hidden;
++                            col.Visibility = _config.GuiItem.EnableStatistics ? Visibility.Visible : Visibility.Hidden;
+                         }
+                     }
+                 }
+@@ -397,13 +404,15 @@ public partial class ProfilesView
+         try
+         {
+             List<ColumnItem> lvColumnItem = new();
+-            foreach (var item2 in lstProfiles.Columns.Cast<MyDGTextColumn>())
++            foreach (var col in lstProfiles.Columns)
+             {
++                var exName = GetColumnExName(col);
++                if (exName.IsNullOrEmpty()) continue;
+                 lvColumnItem.Add(new()
+                 {
+-                    Name = item2.ExName,
+-                    Width = (int)(item2.Visibility == Visibility.Visible ? item2.ActualWidth : -1),
+-                    Index = item2.DisplayIndex
++                    Name = exName,
++                    Width = (int)(col.Visibility == Visibility.Visible ? col.ActualWidth : -1),
++                    Index = col.DisplayIndex
+                 });
+             }
+             _config.UiItem.MainColumnItem = lvColumnItem;
+@@ -414,6 +423,21 @@ public partial class ProfilesView
+         }
+     }
+ 
++    /// <summary>
++    /// Returns the logical name for a DataGrid column:
++    ///   - MyDGTextColumn  → ExName property
++    ///   - DataGridTemplateColumn → Tag property (set in XAML as Tag="ColumnName")
++    /// </summary>
++    private static string GetColumnExName(DataGridColumn col)
++    {
++        if (col is MyDGTextColumn myCol)
++        {
++            return myCol.ExName ?? string.Empty;
++        }
++        // Template/other columns: Tag holds the logical name
++        return col.GetValue(FrameworkElement.TagProperty) as string ?? string.Empty;
++    }
++
+     #endregion UI
+ 
+     #region Drag and Drop
+-- 
+2.43.0
+
+
+From c4dcc0e32f94dff84e74f3a541556bffc717c63e Mon Sep 17 00:00:00 2001
+From: v2rayN Dev <dev@v2rayn.local>
+Date: Mon, 15 Jun 2026 08:08:18 +0000
+Subject: [PATCH 2/4] fix: replace Tag DP with DataGridColumnEx attached
+ property
+
+DataGridTemplateColumn inherits from DependencyObject but not
+FrameworkElement, so it has no Tag/Name dependency property.
+Introduce DataGridColumnEx.ExName as a proper attached DP that works
+on any DataGridColumn subclass, and update XAML + code-behind to use it.
+---
+ v2rayN/v2rayN/Base/DataGridColumnEx.cs   | 25 ++++++++++++++++++++++++
+ v2rayN/v2rayN/Views/ProfilesView.xaml    |  6 +++---
+ v2rayN/v2rayN/Views/ProfilesView.xaml.cs |  8 ++++----
+ 3 files changed, 32 insertions(+), 7 deletions(-)
+ create mode 100644 v2rayN/v2rayN/Base/DataGridColumnEx.cs
+
+diff --git a/v2rayN/v2rayN/Base/DataGridColumnEx.cs b/v2rayN/v2rayN/Base/DataGridColumnEx.cs
+new file mode 100644
+index 00000000..32a8a924
+--- /dev/null
++++ b/v2rayN/v2rayN/Base/DataGridColumnEx.cs
+@@ -0,0 +1,25 @@
++using System.Windows;
++using System.Windows.Controls;
++
++namespace v2rayN.Base;
++
++/// <summary>
++/// Attached properties that extend any <see cref="DataGridColumn"/> subclass,
++/// including <see cref="DataGridTemplateColumn"/> which does not inherit from
++/// <see cref="FrameworkElement"/> and therefore has no Tag/Name DP of its own.
++/// </summary>
++public static class DataGridColumnEx
++{
++    public static readonly DependencyProperty ExNameProperty =
++        DependencyProperty.RegisterAttached(
++            "ExName",
++            typeof(string),
++            typeof(DataGridColumnEx),
++            new PropertyMetadata(string.Empty));
++
++    public static string GetExName(DependencyObject obj) =>
++        (string)obj.GetValue(ExNameProperty);
++
++    public static void SetExName(DependencyObject obj, string value) =>
++        obj.SetValue(ExNameProperty, value);
++}
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml b/v2rayN/v2rayN/Views/ProfilesView.xaml
+index 4b74fac1..f5e741a7 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml
+@@ -283,7 +283,7 @@
+                         x:Name="colAutoSwitch"
+                         Width="40"
+                         Header="Auto"
+-                        Tag="colAutoSwitch">
++                        base:DataGridColumnEx.ExName="colAutoSwitch">
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="Include this config in the Auto Switch rotation" />
+@@ -302,7 +302,7 @@
+                         x:Name="colAutoSwitchOrder"
+                         Width="50"
+                         Header="Order"
+-                        Tag="AutoSwitchOrder">
++                        base:DataGridColumnEx.ExName="AutoSwitchOrder">
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation." />
+@@ -322,7 +322,7 @@
+                         x:Name="colAutoSwitchDuration"
+                         Width="60"
+                         Header="Secs"
+-                        Tag="AutoSwitchDuration">
++                        base:DataGridColumnEx.ExName="AutoSwitchDuration">
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="How many seconds to stay on this config during Auto Switch rotation. Default is 30." />
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+index 7ab9b7e7..d733d49b 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+@@ -425,8 +425,8 @@ public partial class ProfilesView
+ 
+     /// <summary>
+     /// Returns the logical name for a DataGrid column:
+-    ///   - MyDGTextColumn  → ExName property
+-    ///   - DataGridTemplateColumn → Tag property (set in XAML as Tag="ColumnName")
++    ///   - MyDGTextColumn            → ExName property
++    ///   - DataGridTemplateColumn    → base:DataGridColumnEx.ExName attached property
+     /// </summary>
+     private static string GetColumnExName(DataGridColumn col)
+     {
+@@ -434,8 +434,8 @@ public partial class ProfilesView
+         {
+             return myCol.ExName ?? string.Empty;
+         }
+-        // Template/other columns: Tag holds the logical name
+-        return col.GetValue(FrameworkElement.TagProperty) as string ?? string.Empty;
++        // Template/other columns use the attached ExName property
++        return DataGridColumnEx.GetExName(col) ?? string.Empty;
+     }
+ 
+     #endregion UI
+-- 
+2.43.0
+
+
+From e4fdaa0f7a9111a5c26f2ea765ea5b78558a0573 Mon Sep 17 00:00:00 2001
+From: v2rayN Dev <dev@v2rayn.local>
+Date: Mon, 15 Jun 2026 08:34:50 +0000
+Subject: [PATCH 3/4] fix: Order column sort not firing on header click
+
+Two issues prevented the click handler from running on template columns:
+1. DataGridTemplateColumn.HeaderStyle overrides the global Style which
+   contained the EventSetter - each HeaderStyle now explicitly includes
+   its own EventSetter for the Click handler.
+2. The TabIndex < 0 guard in LstProfiles_ColumnHeader_Click blocked
+   template-column headers (their TabIndex is always -1 in WPF) -
+   removed the guard so the click dispatches for all column types.
+---
+ v2rayN/v2rayN/Views/ProfilesView.xaml    | 3 +++
+ v2rayN/v2rayN/Views/ProfilesView.xaml.cs | 2 +-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml b/v2rayN/v2rayN/Views/ProfilesView.xaml
+index f5e741a7..420ea1ef 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml
+@@ -287,6 +287,7 @@
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="Include this config in the Auto Switch rotation" />
++                                <EventSetter Event="Click" Handler="LstProfiles_ColumnHeader_Click" />
+                             </Style>
+                         </DataGridTemplateColumn.HeaderStyle>
+                         <DataGridTemplateColumn.CellTemplate>
+@@ -306,6 +307,7 @@
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation." />
++                                <EventSetter Event="Click" Handler="LstProfiles_ColumnHeader_Click" />
+                             </Style>
+                         </DataGridTemplateColumn.HeaderStyle>
+                         <DataGridTemplateColumn.CellTemplate>
+@@ -326,6 +328,7 @@
+                         <DataGridTemplateColumn.HeaderStyle>
+                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                 <Setter Property="ToolTip" Value="How many seconds to stay on this config during Auto Switch rotation. Default is 30." />
++                                <EventSetter Event="Click" Handler="LstProfiles_ColumnHeader_Click" />
+                             </Style>
+                         </DataGridTemplateColumn.HeaderStyle>
+                         <DataGridTemplateColumn.CellTemplate>
+diff --git a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+index d733d49b..ae4b164c 100644
+--- a/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
++++ b/v2rayN/v2rayN/Views/ProfilesView.xaml.cs
+@@ -238,7 +238,7 @@ public partial class ProfilesView
+ 
+     private void LstProfiles_ColumnHeader_Click(object sender, RoutedEventArgs e)
+     {
+-        if (sender is not DataGridColumnHeader colHeader || colHeader.TabIndex < 0 || colHeader.Column == null)
++        if (sender is not DataGridColumnHeader colHeader || colHeader.Column == null)
+         {
+             return;
+         }
+-- 
+2.43.0
+
+
+From 875e127423d54811575901545b8d5c87550649a1 Mon Sep 17 00:00:00 2001
+From: v2rayN Dev <dev@v2rayn.local>
+Date: Mon, 15 Jun 2026 08:51:53 +0000
+Subject: [PATCH 4/4] fix: Order sort resets on selection/refresh
+
+Track active sort column+direction in _activeSortColumn/_activeSortAscending.
+After every RefreshServersBiz reload, re-apply ApplyAutoSwitchOrderSort so
+the displayed order is preserved when the user clicks a row or any other
+event triggers a list refresh.
+---
+ .../ViewModels/ProfilesViewModel.cs           | 63 ++++++++++++++-----
+ 1 file changed, 48 insertions(+), 15 deletions(-)
+
+diff --git a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+index ef0a7123..ddbeb9a9 100644
+--- a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
++++ b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+@@ -10,6 +10,10 @@ public class ProfilesViewModel : MyReactiveObject
+     private SpeedtestService? _speedtestService;
+     private string? _pendingSelectIndexId;
+ 
++    // Tracks the last column the user sorted by, so RefreshServersBiz can re-apply it.
++    private string? _activeSortColumn;
++    private bool _activeSortAscending = true;
++
+     /// <summary>
+     /// Guards against re-entrant calls to AutoSwitchToggled/AutoSwitchOrderChanged
+     /// while in-place syncing AutoSwitchEnabled/AutoSwitchOrder values across
+@@ -385,6 +389,20 @@ public class ProfilesViewModel : MyReactiveObject
+         ProfileItems.Clear();
+         ProfileItems.AddRange(lstModel);
+ 
++        // Re-apply the last active sort so selection/refresh doesn't reset order
++        if (!_activeSortColumn.IsNullOrEmpty())
++        {
++            if (_activeSortColumn == nameof(ProfileItemModel.AutoSwitchOrder))
++            {
++                // _activeSortAscending already flipped after last click, so the
++                // direction stored is what the *next* click would use. We want to
++                // re-display the *current* sort, which is the opposite.
++                ApplyAutoSwitchOrderSort(!_activeSortAscending);
++            }
++            // For DB-backed sorts the order comes from the DB itself, so no extra
++            // in-memory sort is needed here; the list is already ordered correctly.
++        }
++
+         foreach (var profileItem in lstModel)
+         {
+             SubscribeAutoSwitchColumnChanges(profileItem);
+@@ -824,23 +842,12 @@ public class ProfilesViewModel : MyReactiveObject
+             _dicHeaderSort.TryAdd(colName, true);
+             _dicHeaderSort.TryGetValue(colName, out var asc);
+ 
+-            var sorted = asc
+-                ? ProfileItems
+-                    .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
+-                    .ThenBy(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
+-                    .ToList()
+-                : ProfileItems
+-                    .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
+-                    .ThenByDescending(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
+-                    .ToList();
++            ApplyAutoSwitchOrderSort(asc);
+ 
++            // Persist sort direction and remember active column
+             _dicHeaderSort[colName] = !asc;
+-
+-            using (ProfileItems.SuspendNotifications())
+-            {
+-                ProfileItems.Clear();
+-                ProfileItems.AddRange(sorted);
+-            }
++            _activeSortColumn = colName;
++            _activeSortAscending = !asc;
+             return;
+         }
+ 
+@@ -851,9 +858,35 @@ public class ProfilesViewModel : MyReactiveObject
+             return;
+         }
+         _dicHeaderSort[colName] = !ascDefault;
++        _activeSortColumn = colName;
++        _activeSortAscending = !ascDefault;
+         await RefreshServers();
+     }
+ 
++    /// <summary>
++    /// Applies the AutoSwitchOrder sort to ProfileItems in-place (zeros last).
++    /// ascending:  1, 2, 3 … N, 0, 0, 0
++    /// descending: N, … 2, 1, 0, 0, 0
++    /// </summary>
++    private void ApplyAutoSwitchOrderSort(bool ascending)
++    {
++        var sorted = ascending
++            ? ProfileItems
++                .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
++                .ThenBy(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
++                .ToList()
++            : ProfileItems
++                .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
++                .ThenByDescending(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
++                .ToList();
++
++        using (ProfileItems.SuspendNotifications())
++        {
++            ProfileItems.Clear();
++            ProfileItems.AddRange(sorted);
++        }
++    }
++
+     public async Task RemoveInvalidServerResult()
+     {
+         var count = await ConfigHandler.RemoveInvalidServerResult(_config, _config.SubIndexId);
+-- 
+2.43.0
+

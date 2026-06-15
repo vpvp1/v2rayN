@@ -1,7 +1,7 @@
 From 48fbfcadf71cbffaf9051069c3b311cfbb3365bf Mon Sep 17 00:00:00 2001
 From: v2rayN Dev <dev@v2rayn.local>
 Date: Mon, 15 Jun 2026 08:03:27 +0000
-Subject: [PATCH 1/4] feat: Auto Switch per-profile duration, Order sort (zeros
+Subject: [PATCH 1/5] feat: Auto Switch per-profile duration, Order sort (zeros
  last), column persistence
 
 Changes:
@@ -444,7 +444,7 @@ index 1db64f34..7ab9b7e7 100644
 From c4dcc0e32f94dff84e74f3a541556bffc717c63e Mon Sep 17 00:00:00 2001
 From: v2rayN Dev <dev@v2rayn.local>
 Date: Mon, 15 Jun 2026 08:08:18 +0000
-Subject: [PATCH 2/4] fix: replace Tag DP with DataGridColumnEx attached
+Subject: [PATCH 2/5] fix: replace Tag DP with DataGridColumnEx attached
  property
 
 DataGridTemplateColumn inherits from DependencyObject but not
@@ -553,7 +553,7 @@ index 7ab9b7e7..d733d49b 100644
 From e4fdaa0f7a9111a5c26f2ea765ea5b78558a0573 Mon Sep 17 00:00:00 2001
 From: v2rayN Dev <dev@v2rayn.local>
 Date: Mon, 15 Jun 2026 08:34:50 +0000
-Subject: [PATCH 3/4] fix: Order column sort not firing on header click
+Subject: [PATCH 3/5] fix: Order column sort not firing on header click
 
 Two issues prevented the click handler from running on template columns:
 1. DataGridTemplateColumn.HeaderStyle overrides the global Style which
@@ -615,7 +615,7 @@ index d733d49b..ae4b164c 100644
 From 875e127423d54811575901545b8d5c87550649a1 Mon Sep 17 00:00:00 2001
 From: v2rayN Dev <dev@v2rayn.local>
 Date: Mon, 15 Jun 2026 08:51:53 +0000
-Subject: [PATCH 4/4] fix: Order sort resets on selection/refresh
+Subject: [PATCH 4/5] fix: Order sort resets on selection/refresh
 
 Track active sort column+direction in _activeSortColumn/_activeSortAscending.
 After every RefreshServersBiz reload, re-apply ApplyAutoSwitchOrderSort so
@@ -722,6 +722,202 @@ index ef0a7123..ddbeb9a9 100644
 +        }
 +    }
 +
+     public async Task RemoveInvalidServerResult()
+     {
+         var count = await ConfigHandler.RemoveInvalidServerResult(_config, _config.SubIndexId);
+-- 
+2.43.0
+
+
+From 4fc4d97b3d31836791a64e37e0c726f999db09cc Mon Sep 17 00:00:00 2001
+From: v2rayN Dev <dev@v2rayn.local>
+Date: Mon, 15 Jun 2026 17:47:36 +0000
+Subject: [PATCH 5/5] fix: AutoSwitchOrder sort now persistent like Remarks
+
+Instead of in-memory sorting (lost on refresh/restart), delegate
+AutoSwitchOrder sort to ConfigHandler.SortServers which writes Sort
+values to DB - exactly the same mechanism Remarks uses.
+
+Changes:
+- EServerColName: add AutoSwitchOrder enum value
+- ConfigHandler.SortServers: add ascending/descending cases for
+  AutoSwitchOrder (zeros always last, both directions)
+- ConfigHandler query: include AutoSwitchOrder in ProfileItemModel projection
+- ProfilesViewModel.SortServer: remove special-case branch, AutoSwitchOrder
+  now goes through the same ConfigHandler path as all other columns
+- ProfilesViewModel: remove _activeSortColumn/_activeSortAscending fields
+  and ApplyAutoSwitchOrderSort helper (no longer needed)
+- ProfilesViewModel.RefreshServersBiz: remove in-memory re-sort logic
+---
+ v2rayN/ServiceLib/Enums/EServerColName.cs     |  4 +-
+ v2rayN/ServiceLib/Handler/ConfigHandler.cs    |  9 +++
+ v2rayN/ServiceLib/Models/ConfigItems.cs       | 11 ++++
+ .../ViewModels/ProfilesViewModel.cs           | 65 +------------------
+ 4 files changed, 26 insertions(+), 63 deletions(-)
+
+diff --git a/v2rayN/ServiceLib/Enums/EServerColName.cs b/v2rayN/ServiceLib/Enums/EServerColName.cs
+index 9f50f4df..1220bd5e 100644
+--- a/v2rayN/ServiceLib/Enums/EServerColName.cs
++++ b/v2rayN/ServiceLib/Enums/EServerColName.cs
+@@ -16,5 +16,7 @@ public enum EServerColName
+     TodayDown,
+     TodayUp,
+     TotalDown,
+-    TotalUp
++    TotalUp,
++
++    AutoSwitchOrder
+ }
+diff --git a/v2rayN/ServiceLib/Handler/ConfigHandler.cs b/v2rayN/ServiceLib/Handler/ConfigHandler.cs
+index 70b5ef50..fb89fcbb 100644
+--- a/v2rayN/ServiceLib/Handler/ConfigHandler.cs
++++ b/v2rayN/ServiceLib/Handler/ConfigHandler.cs
+@@ -924,6 +924,7 @@ public static class ConfigHandler
+                               Delay = t33?.Delay ?? 0,
+                               Speed = t33?.Speed ?? 0,
+                               Sort = t33?.Sort ?? 0,
++                              AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0,
+                               TodayDown = (t22?.TodayDown ?? 0).ToString("D16"),
+                               TodayUp = (t22?.TodayUp ?? 0).ToString("D16"),
+                               TotalDown = (t22?.TotalDown ?? 0).ToString("D16"),
+@@ -949,6 +950,10 @@ public static class ConfigHandler
+                 EServerColName.TodayUp => lstProfile.OrderBy(t => t.TodayUp).ToList(),
+                 EServerColName.TotalDown => lstProfile.OrderBy(t => t.TotalDown).ToList(),
+                 EServerColName.TotalUp => lstProfile.OrderBy(t => t.TotalUp).ToList(),
++                EServerColName.AutoSwitchOrder => lstProfile
++                    .OrderBy(t => t.AutoSwitchOrder == 0 ? 1 : 0)
++                    .ThenBy(t => t.AutoSwitchOrder == 0 ? 0 : t.AutoSwitchOrder)
++                    .ToList(),
+                 _ => lstProfile
+             };
+         }
+@@ -969,6 +974,10 @@ public static class ConfigHandler
+                 EServerColName.TodayUp => lstProfile.OrderByDescending(t => t.TodayUp).ToList(),
+                 EServerColName.TotalDown => lstProfile.OrderByDescending(t => t.TotalDown).ToList(),
+                 EServerColName.TotalUp => lstProfile.OrderByDescending(t => t.TotalUp).ToList(),
++                EServerColName.AutoSwitchOrder => lstProfile
++                    .OrderBy(t => t.AutoSwitchOrder == 0 ? 1 : 0)
++                    .ThenByDescending(t => t.AutoSwitchOrder == 0 ? 0 : t.AutoSwitchOrder)
++                    .ToList(),
+                 _ => lstProfile
+             };
+         }
+diff --git a/v2rayN/ServiceLib/Models/ConfigItems.cs b/v2rayN/ServiceLib/Models/ConfigItems.cs
+index 4ddf5299..db337f87 100644
+--- a/v2rayN/ServiceLib/Models/ConfigItems.cs
++++ b/v2rayN/ServiceLib/Models/ConfigItems.cs
+@@ -120,6 +120,17 @@ public class UIItem
+     public bool MacOSShowInDock { get; set; }
+     public List<ColumnItem> MainColumnItem { get; set; }
+     public List<WindowSizeItem> WindowSizeItem { get; set; }
++
++    /// <summary>
++    /// Name of the column the user last sorted by (persisted across restarts).
++    /// Empty string means no active sort.
++    /// </summary>
++    public string ActiveSortColumn { get; set; } = string.Empty;
++
++    /// <summary>
++    /// Direction of the last sort: true = ascending, false = descending.
++    /// </summary>
++    public bool ActiveSortAscending { get; set; } = true;
+ }
+ 
+ [Serializable]
+diff --git a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+index ddbeb9a9..294e051a 100644
+--- a/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
++++ b/v2rayN/ServiceLib/ViewModels/ProfilesViewModel.cs
+@@ -10,10 +10,6 @@ public class ProfilesViewModel : MyReactiveObject
+     private SpeedtestService? _speedtestService;
+     private string? _pendingSelectIndexId;
+ 
+-    // Tracks the last column the user sorted by, so RefreshServersBiz can re-apply it.
+-    private string? _activeSortColumn;
+-    private bool _activeSortAscending = true;
+-
+     /// <summary>
+     /// Guards against re-entrant calls to AutoSwitchToggled/AutoSwitchOrderChanged
+     /// while in-place syncing AutoSwitchEnabled/AutoSwitchOrder values across
+@@ -389,20 +385,6 @@ public class ProfilesViewModel : MyReactiveObject
+         ProfileItems.Clear();
+         ProfileItems.AddRange(lstModel);
+ 
+-        // Re-apply the last active sort so selection/refresh doesn't reset order
+-        if (!_activeSortColumn.IsNullOrEmpty())
+-        {
+-            if (_activeSortColumn == nameof(ProfileItemModel.AutoSwitchOrder))
+-            {
+-                // _activeSortAscending already flipped after last click, so the
+-                // direction stored is what the *next* click would use. We want to
+-                // re-display the *current* sort, which is the opposite.
+-                ApplyAutoSwitchOrderSort(!_activeSortAscending);
+-            }
+-            // For DB-backed sorts the order comes from the DB itself, so no extra
+-            // in-memory sort is needed here; the list is already ordered correctly.
+-        }
+-
+         foreach (var profileItem in lstModel)
+         {
+             SubscribeAutoSwitchColumnChanges(profileItem);
+@@ -836,57 +818,16 @@ public class ProfilesViewModel : MyReactiveObject
+             return;
+         }
+ 
+-        // Special sort for AutoSwitchOrder: zeros always go last
+-        if (colName == nameof(ProfileItemModel.AutoSwitchOrder))
+-        {
+-            _dicHeaderSort.TryAdd(colName, true);
+-            _dicHeaderSort.TryGetValue(colName, out var asc);
+-
+-            ApplyAutoSwitchOrderSort(asc);
+-
+-            // Persist sort direction and remember active column
+-            _dicHeaderSort[colName] = !asc;
+-            _activeSortColumn = colName;
+-            _activeSortAscending = !asc;
+-            return;
+-        }
+-
+         _dicHeaderSort.TryAdd(colName, true);
+-        _dicHeaderSort.TryGetValue(colName, out var ascDefault);
+-        if (await ConfigHandler.SortServers(_config, _config.SubIndexId, colName, ascDefault) != 0)
++        _dicHeaderSort.TryGetValue(colName, out var asc);
++        if (await ConfigHandler.SortServers(_config, _config.SubIndexId, colName, asc) != 0)
+         {
+             return;
+         }
+-        _dicHeaderSort[colName] = !ascDefault;
+-        _activeSortColumn = colName;
+-        _activeSortAscending = !ascDefault;
++        _dicHeaderSort[colName] = !asc;
+         await RefreshServers();
+     }
+ 
+-    /// <summary>
+-    /// Applies the AutoSwitchOrder sort to ProfileItems in-place (zeros last).
+-    /// ascending:  1, 2, 3 … N, 0, 0, 0
+-    /// descending: N, … 2, 1, 0, 0, 0
+-    /// </summary>
+-    private void ApplyAutoSwitchOrderSort(bool ascending)
+-    {
+-        var sorted = ascending
+-            ? ProfileItems
+-                .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
+-                .ThenBy(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
+-                .ToList()
+-            : ProfileItems
+-                .OrderBy(x => x.AutoSwitchOrder == 0 ? 1 : 0)
+-                .ThenByDescending(x => x.AutoSwitchOrder == 0 ? 0 : x.AutoSwitchOrder)
+-                .ToList();
+-
+-        using (ProfileItems.SuspendNotifications())
+-        {
+-            ProfileItems.Clear();
+-            ProfileItems.AddRange(sorted);
+-        }
+-    }
+-
      public async Task RemoveInvalidServerResult()
      {
          var count = await ConfigHandler.RemoveInvalidServerResult(_config, _config.SubIndexId);

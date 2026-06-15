@@ -282,10 +282,12 @@
                     <DataGridTemplateColumn
                         x:Name="colAutoSwitch"
                         Width="40"
-                        Header="Auto">
+                        Header="Auto"
+                        base:DataGridColumnEx.ExName="colAutoSwitch">
                         <DataGridTemplateColumn.HeaderStyle>
                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
                                 <Setter Property="ToolTip" Value="Include this config in the Auto Switch rotation" />
+                                <EventSetter Event="Click" Handler="LstProfiles_ColumnHeader_Click" />
                             </Style>
                         </DataGridTemplateColumn.HeaderStyle>
                         <DataGridTemplateColumn.CellTemplate>
@@ -300,10 +302,12 @@
                     <DataGridTemplateColumn
                         x:Name="colAutoSwitchOrder"
                         Width="50"
-                        Header="Order">
+                        Header="Order"
+                        base:DataGridColumnEx.ExName="AutoSwitchOrder">
                         <DataGridTemplateColumn.HeaderStyle>
                             <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
                                 <Setter Property="ToolTip" Value="Position of this config in the Auto Switch rotation (1, 2, 3, ...). Set to 0 to remove it from the rotation." />
+                                <EventSetter Event="Click" Handler="LstProfiles_ColumnHeader_Click" />
                             </Style>
                         </DataGridTemplateColumn.HeaderStyle>
                         <DataGridTemplateColumn.CellTemplate>
@@ -313,6 +317,27 @@
                                     HorizontalContentAlignment="Right"
                                     BorderThickness="0"
                                     Text="{Binding AutoSwitchOrder, UpdateSourceTrigger=LostFocus}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn
+                        x:Name="colAutoSwitchDuration"
+                        Width="60"
+                        Header="Secs"
+                        base:DataGridColumnEx.ExName="AutoSwitchDuration">
+                        <DataGridTemplateColumn.HeaderStyle>
+                            <Style BasedOn="{StaticResource MaterialDesignDataGridColumnHeader}" TargetType="{x:Type DataGridColumnHeader}">
+                                <Setter Property="ToolTip" Value="How many seconds to stay on this config during Auto Switch rotation. Default is 30." />
+                                <EventSetter Event="Click" Handler="LstProfiles_ColumnHeader_Click" />
+                            </Style>
+                        </DataGridTemplateColumn.HeaderStyle>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBox
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Right"
+                                    BorderThickness="0"
+                                    Text="{Binding AutoSwitchDuration, UpdateSourceTrigger=LostFocus}" />
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>

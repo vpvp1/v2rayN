@@ -456,7 +456,8 @@ public class ProfilesViewModel : MyReactiveObject
                         TotalDown = t22 == null ? "" : Utils.HumanFy(t22.TotalDown),
                         TotalUp = t22 == null ? "" : Utils.HumanFy(t22.TotalUp),
                         AutoSwitchEnabled = t33?.AutoSwitchEnabled ?? false,
-                        AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0
+                        AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0,
+                        AutoSwitchDuration = t33?.AutoSwitchDuration > 0 ? t33.AutoSwitchDuration : 30
                     }).OrderBy(t => t.Sort).ToList();
 
         return lstModel;
@@ -497,6 +498,18 @@ public class ProfilesViewModel : MyReactiveObject
                 }
                 _ = AutoSwitchOrderChanged(item);
             });
+
+        item.WhenAnyValue(x => x.AutoSwitchDuration)
+            .Skip(1)
+            .DistinctUntilChanged()
+            .Subscribe(duration =>
+            {
+                if (_autoSwitchSyncInProgress)
+                {
+                    return;
+                }
+                _ = AutoSwitchDurationChanged(item);
+            });
     }
 
     /// <summary>
@@ -520,6 +533,7 @@ public class ProfilesViewModel : MyReactiveObject
 
                 var enabled = ProfileExManager.Instance.GetAutoSwitchEnabled(profileItem.IndexId);
                 var order = ProfileExManager.Instance.GetAutoSwitchOrder(profileItem.IndexId);
+                var duration = ProfileExManager.Instance.GetAutoSwitchDuration(profileItem.IndexId);
 
                 if (profileItem.AutoSwitchEnabled != enabled)
                 {
@@ -528,6 +542,10 @@ public class ProfilesViewModel : MyReactiveObject
                 if (profileItem.AutoSwitchOrder != order)
                 {
                     profileItem.AutoSwitchOrder = order;
+                }
+                if (profileItem.AutoSwitchDuration != duration)
+                {
+                    profileItem.AutoSwitchDuration = duration;
                 }
             }
         }
@@ -575,6 +593,21 @@ public class ProfilesViewModel : MyReactiveObject
 
         SyncAutoSwitchColumns();
         AppEvents.AutoSwitchListChanged.Publish();
+    }
+
+    /// <summary>
+    /// Called when the user manually edits the "Seconds" (duration) cell for a profile row.
+    /// Persists the per-profile Auto Switch duration to ProfileExManager.
+    /// </summary>
+    public async Task AutoSwitchDurationChanged(ProfileItemModel? item)
+    {
+        if (item is null || item.IndexId.IsNullOrEmpty())
+        {
+            return;
+        }
+
+        ProfileExManager.Instance.SetAutoSwitchDuration(item.IndexId, item.AutoSwitchDuration);
+        await ProfileExManager.Instance.SaveTo();
     }
 
     #endregion Auto Switch column

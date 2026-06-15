@@ -120,6 +120,17 @@ public class UIItem
     public bool MacOSShowInDock { get; set; }
     public List<ColumnItem> MainColumnItem { get; set; }
     public List<WindowSizeItem> WindowSizeItem { get; set; }
+
+    /// <summary>
+    /// Name of the column the user last sorted by (persisted across restarts).
+    /// Empty string means no active sort.
+    /// </summary>
+    public string ActiveSortColumn { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Direction of the last sort: true = ascending, false = descending.
+    /// </summary>
+    public bool ActiveSortAscending { get; set; } = true;
 }
 
 [Serializable]

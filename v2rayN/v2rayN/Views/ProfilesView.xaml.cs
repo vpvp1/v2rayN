@@ -95,6 +95,9 @@ public partial class ProfilesView
                 .ObserveOn(RxSchedulers.MainThreadScheduler)
                 .Subscribe(_ => AutofitColumnWidth())
                 .DisposeWith(disposables);
+
+            // Save column order whenever the user drags a column to a new position
+            lstProfiles.ColumnDisplayIndexChanged += (_, _) => StorageUI();
         });
 
         RestoreUI();
@@ -235,13 +238,16 @@ public partial class ProfilesView
 
     private void LstProfiles_ColumnHeader_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not DataGridColumnHeader colHeader || colHeader.TabIndex < 0 || colHeader.Column == null)
+        if (sender is not DataGridColumnHeader colHeader || colHeader.Column == null)
         {
             return;
         }
 
-        var colName = ((MyDGTextColumn)colHeader.Column).ExName;
-        ViewModel?.SortServer(colName);
+        var colName = GetColumnExName(colHeader.Column);
+        if (!colName.IsNullOrEmpty())
+        {
+            ViewModel?.SortServer(colName);
+        }
     }
 
     private void menuSelectAll_Click(object sender, RoutedEventArgs e)
@@ -365,22 +371,23 @@ public partial class ProfilesView
             var displayIndex = 0;
             foreach (var item in lvColumnItem)
             {
-                foreach (var item2 in lstProfiles.Columns.Cast<MyDGTextColumn>())
+                foreach (var col in lstProfiles.Columns)
                 {
-                    if (item2.ExName == item.Name)
+                    var exName = GetColumnExName(col);
+                    if (exName == item.Name)
                     {
                         if (item.Width < 0)
                         {
-                            item2.Visibility = Visibility.Hidden;
+                            col.Visibility = Visibility.Hidden;
                         }
                         else
                         {
-                            item2.Width = item.Width;
-                            item2.DisplayIndex = displayIndex++;
+                            col.Width = item.Width;
+                            col.DisplayIndex = displayIndex++;
                         }
                         if (item.Name.ToLower().StartsWith("to"))
                         {
-                            item2.Visibility = _config.GuiItem.EnableStatistics ? Visibility.Visible : Visibility.Hidden;
+                            col.Visibility = _config.GuiItem.EnableStatistics ? Visibility.Visible : Visibility.Hidden;
                         }
                     }
                 }
@@ -397,13 +404,15 @@ public partial class ProfilesView
         try
         {
             List<ColumnItem> lvColumnItem = new();
-            foreach (var item2 in lstProfiles.Columns.Cast<MyDGTextColumn>())
+            foreach (var col in lstProfiles.Columns)
             {
+                var exName = GetColumnExName(col);
+                if (exName.IsNullOrEmpty()) continue;
                 lvColumnItem.Add(new()
                 {
-                    Name = item2.ExName,
-                    Width = (int)(item2.Visibility == Visibility.Visible ? item2.ActualWidth : -1),
-                    Index = item2.DisplayIndex
+                    Name = exName,
+                    Width = (int)(col.Visibility == Visibility.Visible ? col.ActualWidth : -1),
+                    Index = col.DisplayIndex
                 });
             }
             _config.UiItem.MainColumnItem = lvColumnItem;
@@ -412,6 +421,21 @@ public partial class ProfilesView
         {
             Logging.SaveLog(_tag, ex);
         }
+    }
+
+    /// <summary>
+    /// Returns the logical name for a DataGrid column:
+    ///   - MyDGTextColumn            → ExName property
+    ///   - DataGridTemplateColumn    → base:DataGridColumnEx.ExName attached property
+    /// </summary>
+    private static string GetColumnExName(DataGridColumn col)
+    {
+        if (col is MyDGTextColumn myCol)
+        {
+            return myCol.ExName ?? string.Empty;
+        }
+        // Template/other columns use the attached ExName property
+        return DataGridColumnEx.GetExName(col) ?? string.Empty;
     }
 
     #endregion UI

@@ -50,6 +50,13 @@ public class ProfileItemModel : ReactiveObject
     [Reactive]
     public int AutoSwitchOrder { get; set; }
 
+    /// <summary>
+    /// How many seconds to stay on this profile during Auto Switch rotation.
+    /// Default is 30 seconds. 0 means use global interval.
+    /// </summary>
+    [Reactive]
+    public int AutoSwitchDuration { get; set; } = 30;
+
     public string GetSummary()
     {
         var summary = $"[{ConfigType}] {Remarks}";

@@ -22,4 +22,11 @@ public class ProfileExItem
     /// AutoSwitchEnabled checkbox is checked.
     /// </summary>
     public int AutoSwitchOrder { get; set; }
+
+    /// <summary>
+    /// How many seconds to stay on this profile during Auto Switch rotation.
+    /// 0 means use the global IntervalSeconds from AutoSwitchItem config.
+    /// Default is 30 seconds when first enabled.
+    /// </summary>
+    public int AutoSwitchDuration { get; set; } = 30;
 }

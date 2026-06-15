@@ -16,5 +16,7 @@ public enum EServerColName
     TodayDown,
     TodayUp,
     TotalDown,
-    TotalUp
+    TotalUp,
+
+    AutoSwitchOrder
 }

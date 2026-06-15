@@ -22,6 +22,8 @@ public class AutoSwitchManager
     private readonly object _syncRoot = new();
     private int _currentRotationIndex = -1;
     private bool _initialized;
+    // Track when the current profile's time slot expires
+    private DateTime _currentSlotExpiry = DateTime.MinValue;
 
     private AutoSwitchManager()
     {
@@ -168,15 +170,19 @@ public class AutoSwitchManager
         lock (_syncRoot)
         {
             _currentRotationIndex = -1;
-            _timer = new System.Timers.Timer(IntervalSeconds * 1000d)
+            // Use a 1-second polling timer so we can honour per-profile durations
+            // without restarting the timer every time the duration changes.
+            _timer = new System.Timers.Timer(1000d)
             {
                 AutoReset = true,
             };
             _timer.Elapsed += (_, _) => _ = OnTimerElapsed();
+            // Set expiry immediately so the first tick switches right away
+            _currentSlotExpiry = DateTime.UtcNow;
             _timer.Start();
         }
 
-        Logging.SaveLog($"{_tag} - started, interval = {IntervalSeconds}s");
+        Logging.SaveLog($"{_tag} - started (per-profile duration mode)");
     }
 
     private void StopTimer()
@@ -199,7 +205,11 @@ public class AutoSwitchManager
     {
         try
         {
-            await SwitchToNextProfile();
+            // Only switch when the current profile's time slot has expired
+            if (DateTime.UtcNow >= _currentSlotExpiry)
+            {
+                await SwitchToNextProfile();
+            }
         }
         catch (Exception ex)
         {
@@ -238,6 +248,13 @@ public class AutoSwitchManager
             return;
         }
 
+        // Schedule the next switch based on this profile's per-profile duration
+        var durationSeconds = ProfileExManager.Instance.GetAutoSwitchDuration(nextIndexId);
+        lock (_syncRoot)
+        {
+            _currentSlotExpiry = DateTime.UtcNow.AddSeconds(durationSeconds);
+        }
+
         if (nextIndexId == _config.IndexId)
         {
             // Already the active server; still counts as a rotation step, but
@@ -257,7 +274,7 @@ public class AutoSwitchManager
 
         if (await ConfigHandler.SetDefaultServerIndex(_config, nextIndexId) == 0)
         {
-            Logging.SaveLog($"{_tag} - switched to: {item.GetSummary()}");
+            Logging.SaveLog($"{_tag} - switched to: {item.GetSummary()} (duration={durationSeconds}s)");
             AppEvents.ProfilesRefreshRequested.Publish();
             AppEvents.ReloadRequested.Publish();
         }

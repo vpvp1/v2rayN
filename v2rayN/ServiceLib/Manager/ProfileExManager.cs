@@ -98,7 +98,8 @@ public class ProfileExManager
             Sort = 0,
             Message = string.Empty,
             AutoSwitchEnabled = false,
-            AutoSwitchOrder = 0
+            AutoSwitchOrder = 0,
+            AutoSwitchDuration = 30
         };
         _lstProfileEx.Add(profileEx);
         IndexIdEnqueue(indexId);
@@ -180,6 +181,27 @@ public class ProfileExManager
     }
 
     #region Auto Switch
+
+    /// <summary>
+    /// Returns the per-profile Auto Switch duration in seconds (default 30).
+    /// </summary>
+    public int GetAutoSwitchDuration(string indexId)
+    {
+        var profileEx = _lstProfileEx.FirstOrDefault(t => t.IndexId == indexId);
+        var dur = profileEx?.AutoSwitchDuration ?? 30;
+        return dur > 0 ? dur : 30;
+    }
+
+    /// <summary>
+    /// Sets the per-profile Auto Switch duration (in seconds).
+    /// Must be >= 1. Values <= 0 are treated as 30.
+    /// </summary>
+    public void SetAutoSwitchDuration(string indexId, int seconds)
+    {
+        var profileEx = GetProfileExItem(indexId);
+        profileEx.AutoSwitchDuration = Math.Max(1, seconds);
+        IndexIdEnqueue(indexId);
+    }
 
     /// <summary>
     /// Returns whether the given profile is included in the Auto Switch rotation.

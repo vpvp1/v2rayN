@@ -924,6 +924,7 @@ public static class ConfigHandler
                               Delay = t33?.Delay ?? 0,
                               Speed = t33?.Speed ?? 0,
                               Sort = t33?.Sort ?? 0,
+                              AutoSwitchOrder = t33?.AutoSwitchOrder ?? 0,
                               TodayDown = (t22?.TodayDown ?? 0).ToString("D16"),
                               TodayUp = (t22?.TodayUp ?? 0).ToString("D16"),
                               TotalDown = (t22?.TotalDown ?? 0).ToString("D16"),
@@ -949,6 +950,10 @@ public static class ConfigHandler
                 EServerColName.TodayUp => lstProfile.OrderBy(t => t.TodayUp).ToList(),
                 EServerColName.TotalDown => lstProfile.OrderBy(t => t.TotalDown).ToList(),
                 EServerColName.TotalUp => lstProfile.OrderBy(t => t.TotalUp).ToList(),
+                EServerColName.AutoSwitchOrder => lstProfile
+                    .OrderBy(t => t.AutoSwitchOrder == 0 ? 1 : 0)
+                    .ThenBy(t => t.AutoSwitchOrder == 0 ? 0 : t.AutoSwitchOrder)
+                    .ToList(),
                 _ => lstProfile
             };
         }
@@ -969,6 +974,10 @@ public static class ConfigHandler
                 EServerColName.TodayUp => lstProfile.OrderByDescending(t => t.TodayUp).ToList(),
                 EServerColName.TotalDown => lstProfile.OrderByDescending(t => t.TotalDown).ToList(),
                 EServerColName.TotalUp => lstProfile.OrderByDescending(t => t.TotalUp).ToList(),
+                EServerColName.AutoSwitchOrder => lstProfile
+                    .OrderBy(t => t.AutoSwitchOrder == 0 ? 1 : 0)
+                    .ThenByDescending(t => t.AutoSwitchOrder == 0 ? 0 : t.AutoSwitchOrder)
+                    .ToList(),
                 _ => lstProfile
             };
         }
